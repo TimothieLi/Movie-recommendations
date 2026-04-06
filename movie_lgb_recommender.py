@@ -230,10 +230,10 @@ def run_recommender_pipeline():
     print(f"Mean NDCG@10   : {avg_ndcg:.2f}%")
     print("==========================================\n")
     
-    return test_users, top_10_df, test_ground_truth, movies_df
+    return test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates
 
 def main():
-    test_users, top_10_df, test_ground_truth, movies_df = run_recommender_pipeline()
+    test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates = run_recommender_pipeline()
     
     # ==========================================
     # 7. 額外印出幾位 user 的推薦結果，幫助檢查結果是否合理

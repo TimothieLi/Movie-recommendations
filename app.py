@@ -13,12 +13,12 @@ st.title("🎬 專題：電影推薦系統 (LightGBM)")
 # --- 1. 快取模型與預測結果 ---
 # 使用 st.cache_data 讓我們只在「初次打開網頁」時花時間訓練模型，之後都不會重跑
 @st.cache_data(show_spinner="模型訓練與特徵工程進行中，大約需要 5~10 秒，請稍後...")
-def load_and_predict_all():
+def load_all_data_and_predict():
     # 執行整個 offline batch pipeline
-    test_users, top_10_df, test_ground_truth, movies_df = run_recommender_pipeline()
-    return list(test_users), top_10_df, test_ground_truth, movies_df
+    test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates = run_recommender_pipeline()
+    return list(test_users), top_10_df, test_ground_truth, movies_df, unseen_candidates
 
-test_users, top_10_df, test_ground_truth, movies_df = load_and_predict_all()
+test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates = load_all_data_and_predict()
 
 # --- 2. 側邊欄 ---
 st.sidebar.header("🕹️ 控制面板")
@@ -74,3 +74,99 @@ if len(actual_liked_movies) > 0:
         st.dataframe(actual_liked_movies.reset_index(drop=True), use_container_width=True)
 else:
     st.info("這名用戶在 Test Set 中並沒有留下這類正向評價。")
+
+# ==========================================
+# 4. Week 3 分析專區：Novelty 與 Diversity
+# ==========================================
+st.markdown("---")
+st.markdown("### 📊 特徵工程：Novelty 與 Diversity 分析 (Week 3)")
+
+with st.expander("👉 點擊展開查看 Novelty 分布與極端值分析", expanded=True):
+    with st.spinner("計算 Novelty 特徵與相似度中..."):
+        # 匯入我們新寫的 week 3 腳本函式
+        from week3_features import get_week3_analysis
+        
+        movies_feat, top3_highest, top3_lowest, m1_title, m2_title, sim_score, fig = get_week3_analysis()
+        
+        st.subheader("1. Novelty (新穎度) 分布圖")
+        st.write("定義：`Novelty(i) = -log(popularity(i) / max_popularity)`，並經過 Min-Max 正規化至 `[0, 1]` 區間。")
+        st.pyplot(fig)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("🥶 最冷門電影 (Novelty $\\approx$ 1.0)")
+            st.dataframe(top3_highest, use_container_width=True)
+            
+        with col2:
+            st.subheader("🔥 最熱門電影 (Novelty $\\approx$ 0.0)")
+            st.dataframe(top3_lowest, use_container_width=True)
+            
+        st.markdown("---")
+        st.subheader("2. Diversity (相似度) 函數測試")
+        st.write("定義：`Sim(i, j) = Genre Multi-hot Vector 內積 (Overlap 數量)`")
+        st.info(f"電影 **{m1_title}** 與 **{m2_title}** 的 Genre Overlap 數量為： **{sim_score:.0f}**")
+
+# ==========================================
+# 5. Week 4 分析專區：Pareto 與 MMR 重新排序
+# ==========================================
+st.markdown("---")
+st.markdown("### 🏆 Re-ranking 演算法：Pareto & MMR (Week 4)")
+
+with st.expander("👉 點擊展開查看 Pareto 與 MMR 排序結果", expanded=False):
+    from week4_reranking import pareto_rerank, mmr_rerank
+    
+    st.write("我們從系統預測的**完整候選清單**中取得該使用者的資料，並加入 Novelty 特徵後重新排序。")
+    user_candidates = unseen_candidates[unseen_candidates['user_id'] == selected_user_id].copy()
+    
+    # 確保我們先跑過 Week 3 以便拿到 movies_feat 的 novelty_norm
+    # 在上方 Week3 expander 內，movies_feat 變數已經準備好，如果沒點開，這裡直接呼叫
+    try:
+        movies_feat_for_w4 = movies_feat
+    except NameError:
+        from week3_features import get_week3_analysis
+        movies_feat_for_w4, _, _, _, _, _, _ = get_week3_analysis()
+        
+    user_candidates = user_candidates.merge(movies_feat_for_w4[['movie_id', 'novelty_norm']], on='movie_id', how='left')
+    
+    genre_cols = [
+        "unknown", "Action", "Adventure", "Animation",
+        "Children's", "Comedy", "Crime", "Documentary", "Drama", "Fantasy",
+        "Film-Noir", "Horror", "Musical", "Mystery", "Romance", "Sci-Fi",
+        "Thriller", "War", "Western"
+    ]
+    
+    col_lgb, col_pareto = st.columns(2)
+    
+    with col_lgb:
+        st.subheader("1️⃣ 原始 LightGBM Top-10")
+        lgb_display = user_top_movies[['movie_title', 'predict_score']].copy()
+        lgb_display.index = range(1, len(lgb_display) + 1)
+        st.dataframe(lgb_display, use_container_width=True)
+        
+    with col_pareto:
+        st.subheader("2️⃣ Pareto Re-ranking Top-10")
+        pareto_df = pareto_rerank(user_candidates, k=10)
+        pareto_display = pareto_df[['movie_title', 'predict_score', 'novelty_norm']].copy()
+        pareto_display.index = range(1, len(pareto_display) + 1)
+        st.dataframe(pareto_display, use_container_width=True)
+        
+    st.markdown("---")
+    st.subheader("3️⃣ MMR (Maximal Marginal Relevance) Top-10")
+    st.write("比較不同 $\lambda$ 對於 Relevance 與 Diversity 的影響：")
+    
+    lambda_vals = [0.0, 0.25, 0.5, 0.75, 1.0]
+    tabs = st.tabs([f"λ = {l}" for l in lambda_vals])
+    
+    for i, l_val in enumerate(lambda_vals):
+        with tabs[i]:
+            if l_val == 1.0:
+                st.write("**$\lambda=1.0$：完全只看 LightGBM Preference 分數 (效果等同於上方的原始 LightGBM)**")
+            elif l_val == 0.0:
+                st.write("**$\lambda=0.0$：極度著重於 Diversity，盡可能挑選跟已挑選集合不相似的電影**")
+            else:
+                st.write(f"**$\lambda={l_val}$：平衡 Relevance 與 Diversity**")
+                
+            mmr_df = mmr_rerank(user_candidates, genre_cols, lambda_val=l_val, k=10)
+            mmr_display = mmr_df[['movie_title', 'predict_score', 'novelty_norm']].copy()
+            mmr_display.index = range(1, len(mmr_display) + 1)
+            st.dataframe(mmr_display, use_container_width=True)

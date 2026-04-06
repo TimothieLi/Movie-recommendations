@@ -48,7 +48,23 @@ streamlit run app.py
 ```
 > 註：執行前請確保此資料夾下有 `MovieLens 100K` 資料集 (包含 `u.data` 及 `u.item`)。
 
+## 最新進度：Week 3 & Week 4 演算法升級
+
+除了基本的 LightGBM 模型外，系統現已整合多目標策略，以提升推薦滿意度：
+
+- **👉 Week 3: 多目標特徵工程 (Multi-objective Feature Engineering)**
+  - 實作了 **Novelty (新穎度)** 計算：`Novelty(i) = -log(popularity(i) / max_popularity)`
+  - 實作了 **Diversity (多樣性)** 相似度基礎：基於 Genre 的 Multi-hot 內積算法計算。
+  - 獨立腳本：`week3_features.py`，支援繪製電影分布。
+
+- **👉 Week 4: 雙重重新排序策略 (Re-ranking)**
+  - **Pareto Dominance**：尋找「不可支配」的電影集合 (Pareto Frontier) 進行重排，在不妥協分數的情況下保證最佳新穎度。
+  - **Maximal Marginal Relevance (MMR)**：實作 Greedy 貪婪演算法，透過動態切換 $\lambda$ (0.0 ~ 1.0) 自由調配 Relevance 與 Diversity 的拉扯權衡。
+  - 獨立腳本：`week4_reranking.py`。
+  
+這兩階段的成果都已整合並視覺化於現有的 Streamlit 首頁中，用戶隨時可以在介面最底部點擊查看並互動。
+
 ## 未來展望
 - 導入 TMDB 開放電影 API 獲取更多 Meta 特徵。
-- 加入推薦的多樣性 (Diversity) 與新穎性 (Novelty) 評估。
+- 結合 NLP (Week 5) 對於電影描述或評論進行文本探勘。
 - 嘗試將架構深度學習化。
