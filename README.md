@@ -68,8 +68,49 @@ streamlit run app.py
   - **動態 Pareto Re-ranking**：打破傳統單純排序，實作高階動態 Pareto 機制。當指令包含單一目標時採用高速排序；當面臨 `diversity` (多樣性) 目標時，則採用 Greedy 邊界尋優，每一輪皆會根據「當前已選片單」即時翻新候選池的 Jaccard 相似度！
   - 獨立腳本：`week5_nlp_pareto.py`。
   
-這三個禮拜的進階演算法成果都已完整串接並整合於目前所見的 Streamlit 介面中，並透過側邊欄 (Sidebar) 獨立頁面呈現，隨時可以進行網頁互動展示！
+- **👉 Week 6: 方法比較與系統評估分析 (System-Level Evaluation)**
+  - **多維評估指標**：實作了 `NDCG@K`（排序準確度）、`Novelty@K`（新穎度平均）、`ILD@K（Intra-List Diversity）`（清單內成對相似度）、`Coverage`（涵蓋率）共四大量化指標。
+  - **大規模批次比較**：在相同候選池（前 50 名）與 Top-10 條件下，對 LightGBM Baseline、MMR（五種 λ）、Pareto 及四種 NLP 目標組合進行全面 Batch 評測。
+  - **Trade-off 視覺化**：以 Seaborn 散佈圖繪製 `NDCG vs Novelty` 及 `NDCG vs ILD (Diversity)` 對決，清楚展現不同方法在準確度與多元性之間的取捨。
+  - 評估腳本：`week6_evaluation.py`。
+
+這五個階段的成果完整地串接並整合於 Streamlit 互動介面中，隨時可以進行網頁互動展示！
+
+## 啟動方式 (How to Run)
+
+本專案提供兩個 Streamlit 入口：
+
+```bash
+# 完整功能版（含 Week 3~6 所有頁籤）
+python -m streamlit run app.py
+
+# 精簡展示版（專題 Demo 用）
+python -m streamlit run demo_app.py
+```
+
+> 若同時啟動兩個版本，請指定不同 Port：
+> ```bash
+> python -m streamlit run demo_app.py --server.port 8502
+> ```
+
+## Demo 操作說明
+
+`demo_app.py` 是一個專為專題展示設計的輕量級互動面板：
+
+1. 在側邊欄輸入 **User ID**（Test Set 範圍內）
+2. 從下拉選單選擇 **推薦方法**（Baseline / MMR / Pareto / Pareto+NLP）
+3. 若選擇 MMR，可用 Slider 即時調整 **λ 值**
+4. 若選擇 Pareto + NLP，可輸入 **自然語言 Prompt**（例如：推薦冷門且多樣的電影）
+5. 點擊「🚀 產生推薦」查看推薦結果
+6. 畫面同時呈現 **Baseline 對照** 與 **所選方法的 Top-K 結果**
+
+## Offline 表現 (Baseline)
+
+系統的初版表現為：
+- **Mean Recall@10** : ~4.74% (以真實 Rating >= 3.0 當作相關基準)
+- **Mean NDCG@10** : ~14.10%
+*(由於特徵簡潔，這是一個理想的 Baseline)*
 
 ## 未來展望
 - 嘗試將現行 LambdaRank 架構神經網路化 (Deep Learning Ranking Models)。
-- 支援真實使用者的歷史即時操作回饋迴圈 (Online Learning)。
+- 支援真實使用者歷史即時操作的回饋迴圈 (Online Learning)。

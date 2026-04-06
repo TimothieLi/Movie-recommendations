@@ -45,6 +45,8 @@ if st.sidebar.button("🏆 Re-ranking 演算法 (Week 4)", use_container_width=T
     st.session_state['page_selection'] = "🏆 Re-ranking 演算法 (Week 4)"
 if st.sidebar.button("✨ NLP 動態推薦 (Week 5)", use_container_width=True):
     st.session_state['page_selection'] = "✨ NLP 動態推薦 (Week 5)"
+if st.sidebar.button("📈 方法比較與分析 (Week 6)", use_container_width=True):
+    st.session_state['page_selection'] = "📈 方法比較與分析 (Week 6)"
 
 page_selection = st.session_state['page_selection']
 
@@ -259,3 +261,104 @@ elif page_selection == "✨ NLP 動態推薦 (Week 5)":
         nlp_display = nlp_display.round(4)
         
         st.dataframe(nlp_display, use_container_width=True)
+
+elif page_selection == "📈 方法比較與分析 (Week 6)":
+    # ==========================================
+    # 7. Week 6: 方法比較與分析
+    # ==========================================
+    st.markdown("### 📈 Week 6: 系統推薦方法全面比較")
+    
+    st.write("在這裡我們將針對全體（或抽樣部分）的 Test Users，評估目前所有實作過的推薦系統演算法（LightGBM, MMR, Pareto, Pareto + NLP）在各項客觀基準的綜合表現。")
+    
+    sample_size = st.slider("選擇要進行評測的 Test User 樣本數量 (數量越大，結果越精準但運算時間較長)", min_value=10, max_value=len(test_users), value=30, step=10)
+    
+    if st.button("🚀 執行/重新整理效能評測", type="primary"):
+        from week6_evaluation import run_week6_experiments
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        
+        genre_cols = [
+            "unknown", "Action", "Adventure", "Animation",
+            "Children's", "Comedy", "Crime", "Documentary", "Drama", "Fantasy",
+            "Film-Noir", "Horror", "Musical", "Mystery", "Romance", "Sci-Fi",
+            "Thriller", "War", "Western"
+        ]
+        
+        # 取隨機或排序過的部分樣本 (這裡為求穩定取排序前 N 名)
+        test_users_subset = sorted([int(u) for u in test_users])[:sample_size]
+        total_movies = len(movies_df)
+        
+        progress_bar = st.progress(0.0)
+        status_text = st.empty()
+        
+        def update_progress(val):
+            progress_bar.progress(val)
+            status_text.write(f"正在運算中... (已完成 {int(val*100)}%)")
+            
+        with st.spinner("評測進行中，包含大量的 Jaccard 與多目標 Pareto 計算..."):
+            summary_df = run_week6_experiments(test_users_subset, unseen_candidates, test_ground_truth, genre_cols, total_movies_count=total_movies, pool_size=50, k=10, progress_callback=update_progress)
+            
+        progress_bar.empty()
+        status_text.empty()
+        
+        st.success("✅ 評測完成！")
+        
+        st.markdown("#### 📊 評估結果比較表 (Comparison DataFrame)")
+        st.dataframe(summary_df.round(4), use_container_width=True)
+        
+        st.markdown("#### 📉 Trade-off 分布圖 (NDCG vs Novelty & ILD)")
+        
+        # 使用 matplotlib 與 seaborn 繪製對比圖
+        sns.set_theme(style="whitegrid")
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+        
+        # 第一張圖：NDCG vs Novelty
+        sns.scatterplot(data=summary_df, x="Novelty@10", y="NDCG@10", hue="Method", style="Method", s=150, ax=axes[0])
+        axes[0].set_title("Trade-off: NDCG@10 vs Novelty@10", fontsize=14, fontweight='bold')
+        
+        # 將參數標示在點的旁邊
+        for i in range(len(summary_df)):
+            axes[0].text(summary_df["Novelty@10"][i], summary_df["NDCG@10"][i] - 0.001, 
+                         summary_df["Parameters"][i], fontsize=9, alpha=0.8)
+                         
+        # 第二張圖：NDCG vs ILD
+        sns.scatterplot(data=summary_df, x="ILD@10", y="NDCG@10", hue="Method", style="Method", s=150, ax=axes[1])
+        axes[1].set_title("Trade-off: NDCG@10 vs ILD@10 (Diversity)", fontsize=14, fontweight='bold')
+        
+        for i in range(len(summary_df)):
+            axes[1].text(summary_df["ILD@10"][i], summary_df["NDCG@10"][i] - 0.001, 
+                         summary_df["Parameters"][i], fontsize=9, alpha=0.8)
+                         
+        plt.tight_layout()
+        st.pyplot(fig)
+        
+        st.markdown("---")
+        st.markdown(f"#### 🔍 Sanity Check: 單一用戶直觀比對 (User **{selected_user_id}**)")
+        st.write("以下為系統挑出部分極端條件下的 Top-5 呈現差異（避免紙上談兵，直接透過實體清單觀察特徵改變）：")
+        
+        from week4_reranking import mmr_rerank, pareto_rerank
+        from week5_nlp_pareto import dynamic_pareto_rerank, parse_query
+        
+        user_cands = unseen_candidates[unseen_candidates['user_id'] == selected_user_id].copy()
+        if 'novelty_norm' not in user_cands.columns and 'novelty' in user_cands.columns:
+            user_cands['novelty_norm'] = user_cands['novelty']
+            
+        def get_top5_titles(fn):
+            res_df = fn(user_cands).head(5)
+            # 組合為字串方便觀看
+            return " ⭐ ".join(res_df['movie_title'].tolist())
+            
+        # 綁定參數
+        lgbm_fn = lambda c: c.sort_values('predict_score', ascending=False)
+        mmr_fn = lambda c: mmr_rerank(c, genre_cols, lambda_val=0.0, k=10)
+        par_fn = lambda c: pareto_rerank(c, k=10)
+        nlp_fn = lambda c: dynamic_pareto_rerank(c, genre_cols, parse_query("冷門 多樣"), k=10)
+        
+        s_data = [
+            {"演算法策略": "LightGBM 原味模型 (全憑偏好)", "前 5 推薦電影陣容": get_top5_titles(lgbm_fn)},
+            {"演算法策略": "MMR (λ=0.0 / 完全拋棄偏好分數)", "前 5 推薦電影陣容": get_top5_titles(mmr_fn)},
+            {"演算法策略": "原版雙目標 Pareto (偏好+新穎)", "前 5 推薦電影陣容": get_top5_titles(par_fn)},
+            {"演算法策略": "NLP 動態 Pareto (指令: 冷門+多樣)", "前 5 推薦電影陣容": get_top5_titles(nlp_fn)}
+        ]
+        
+        st.table(pd.DataFrame(s_data))

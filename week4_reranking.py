@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 
-def pareto_rerank(user_candidates, k=10):
+def pareto_rerank(user_candidates, k=10, pool_size=50):
     """
     Pareto Dominance Re-ranking
     找出 Pareto Frontier (Layer 1, Layer 2...)
@@ -11,7 +11,15 @@ def pareto_rerank(user_candidates, k=10):
       - novelty_norm(A) >= novelty_norm(B)
       - 且至少有一項是大於
     """
-    df = user_candidates.copy().reset_index(drop=True)
+    df = user_candidates.sort_values('predict_score', ascending=False).head(pool_size).copy().reset_index(drop=True)
+    
+    # 確保 novelty_norm 存在（相容 Week 5 TMDB 整合版）
+    if 'novelty_norm' not in df.columns:
+        if 'novelty' in df.columns:
+            df['novelty_norm'] = df['novelty']
+        else:
+            df['novelty_norm'] = 0.5
+            
     selected_indices = []
     remaining_indices = list(df.index)
     layer = 1
