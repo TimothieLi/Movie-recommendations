@@ -80,6 +80,50 @@ def run_recommender_pipeline():
     movies_df = pd.read_csv(u_item_path, sep='|', names=item_cols, encoding='latin-1')
     movies_df = movies_df[['movie_id', 'movie_title'] + genre_cols]
     
+    # === TMDB Metadata Integration (Week 5) ===
+    tmdb_path = os.path.join('TMDB metadata', 'tmdb_5000_movies.csv')
+    if os.path.exists(tmdb_path):
+        tmdb_df = pd.read_csv(tmdb_path)
+        
+        # 1. MovieLens Title & Year Parsing
+        movies_df['title_clean'] = movies_df['movie_title'].str.extract(r'^(.*?)(?:\s*\(\d{4}\))?$')[0].str.lower().str.strip()
+        movies_df['year'] = movies_df['movie_title'].str.extract(r'\((\d{4})\)$')[0]
+        
+        # 2. TMDB Title & Year Parsing
+        tmdb_df['title_clean'] = tmdb_df['title'].astype(str).str.lower().str.strip()
+        tmdb_df['year'] = pd.to_datetime(tmdb_df['release_date'], errors='coerce').dt.year.astype('Int64').astype(str)
+        
+        # 3. Merge
+        # rename TMDB popularity to avoid conflict with Item Popularity feature in LightGBM
+        tmdb_subset = tmdb_df[['title_clean', 'year', 'popularity', 'vote_average', 'vote_count']].rename(columns={'popularity': 'tmdb_popularity'})
+        tmdb_subset = tmdb_subset.drop_duplicates(subset=['title_clean', 'year'])
+        
+        movies_df = movies_df.merge(tmdb_subset, on=['title_clean', 'year'], how='left')
+        
+        # 4. Fill missing values with median
+        movies_df['tmdb_popularity'] = movies_df['tmdb_popularity'].fillna(movies_df['tmdb_popularity'].median())
+        movies_df['vote_average'] = movies_df['vote_average'].fillna(movies_df['vote_average'].median())
+        
+        movies_df['release_year'] = pd.to_numeric(movies_df['year'], errors='coerce')
+        movies_df['release_year'] = movies_df['release_year'].fillna(movies_df['release_year'].median())
+        
+        # 5. Calculate normalized features for Week 5 NLP mapping
+        from sklearn.preprocessing import MinMaxScaler
+        scaler = MinMaxScaler()
+        movies_df['recency'] = scaler.fit_transform(movies_df[['release_year']])
+        movies_df['quality'] = scaler.fit_transform(movies_df[['vote_average']])
+        
+        max_pop = movies_df['tmdb_popularity'].max()
+        if max_pop == 0: max_pop = 1
+        raw_novelty = -np.log((movies_df['tmdb_popularity'] / max_pop) + 1e-9)
+        movies_df['novelty'] = scaler.fit_transform(raw_novelty.values.reshape(-1, 1))
+        
+        movies_df = movies_df.drop(columns=['title_clean', 'year'])
+    else:
+        print("TMDB metadata not found!")
+        for col in ['tmdb_popularity', 'vote_average', 'vote_count', 'recency', 'quality', 'novelty', 'release_year']:
+            movies_df[col] = 0.5
+    
     # ==========================================
     # 2. 資料切分 (Train/Test Split 80/20)
     # ==========================================

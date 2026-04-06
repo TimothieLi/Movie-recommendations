@@ -62,9 +62,14 @@ streamlit run app.py
   - **Maximal Marginal Relevance (MMR)**：實作 Greedy 貪婪演算法，透過動態切換 $\lambda$ (0.0 ~ 1.0) 自由調配 Relevance 與 Diversity 的拉扯權衡。
   - 獨立腳本：`week4_reranking.py`。
   
-這兩階段的成果都已整合並視覺化於現有的 Streamlit 首頁中，用戶隨時可以在介面最底部點擊查看並互動。
+- **👉 Week 5: TMDB 資料串接與 NLP 動態多目標推薦**
+  - **資料擴充**：將 MovieLens 與 TMDB (tmdb_5000_movies) 資料庫進行清洗配對，萃取 `popularity`, `vote_average` 及 `release_year`，擴充為進階評估特徵 (`novelty`, `quality` & `recency`)。
+  - **自然語言解析**：實作了 Rule-based NLP 分析器，支援直覺的語意關鍵字組合（如：「推薦近期上映而且多樣化的好片」）。
+  - **動態 Pareto Re-ranking**：打破傳統單純排序，實作高階動態 Pareto 機制。當指令包含單一目標時採用高速排序；當面臨 `diversity` (多樣性) 目標時，則採用 Greedy 邊界尋優，每一輪皆會根據「當前已選片單」即時翻新候選池的 Jaccard 相似度！
+  - 獨立腳本：`week5_nlp_pareto.py`。
+  
+這三個禮拜的進階演算法成果都已完整串接並整合於目前所見的 Streamlit 介面中，並透過側邊欄 (Sidebar) 獨立頁面呈現，隨時可以進行網頁互動展示！
 
 ## 未來展望
-- 導入 TMDB 開放電影 API 獲取更多 Meta 特徵。
-- 結合 NLP (Week 5) 對於電影描述或評論進行文本探勘。
-- 嘗試將架構深度學習化。
+- 嘗試將現行 LambdaRank 架構神經網路化 (Deep Learning Ranking Models)。
+- 支援真實使用者的歷史即時操作回饋迴圈 (Online Learning)。
