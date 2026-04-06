@@ -1,0 +1,18 @@
+# Virtual Environments
+venv/
+env/
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS
+.DS_Store
+
+# Streamlit
+.streamlit/
+
+# You can uncomment the following line if you don't want to push the dataset to GitHub
+# MovieLens 100K/
