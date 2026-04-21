@@ -149,11 +149,53 @@ def run_recommender_pipeline():
     # [User Feature] 使用者平均評分
     user_avg = train_df.groupby('user_id')['rating'].mean().reset_index(name='user_avg_rating')
     
+    # [新增] Item Co-occurrence 計算基底矩陣 (Train-only)
+    U_max = int(ratings_df['user_id'].max()) + 2
+    M_max = int(max(ratings_df['movie_id'].max(), movies_df['movie_id'].max())) + 2
+    
+    user_train_history = train_df.groupby('user_id')['movie_id'].apply(set).to_dict()
+    
+    cooc_matrix = np.zeros((M_max, M_max), dtype=np.float32)
+    for uid, history in user_train_history.items():
+        hist_list = list(history)
+        if len(hist_list) > 1:
+            for i in range(len(hist_list)):
+                for j in range(i + 1, len(hist_list)):
+                    m1, m2 = hist_list[i], hist_list[j]
+                    cooc_matrix[m1, m2] += 1
+                    cooc_matrix[m2, m1] += 1
+                    
+    hist_matrix = np.zeros((U_max, M_max), dtype=np.float32)
+    for uid, history in user_train_history.items():
+        hist_matrix[uid, list(history)] = 1.0
+        
+    user_cooc_sum_matrix = np.dot(hist_matrix, cooc_matrix)
+    user_hist_sizes = np.sum(hist_matrix, axis=1)
+    
+    cooc_indicator = (cooc_matrix > 0).astype(np.float32)
+    user_cooc_hit_matrix = np.dot(hist_matrix, cooc_indicator)
+    
+    user_cooc_max_matrix = np.zeros((U_max, M_max), dtype=np.float32)
+    for uid, history in user_train_history.items():
+        if history:
+            user_cooc_max_matrix[uid] = np.max(cooc_matrix[list(history)], axis=0)
+    
     # [Interaction Feature 原料] 使用者對各 genre 的偏好輪廓
     user_genre_counts = train_df.groupby('user_id')[genre_cols].sum()
     user_genre_profile = user_genre_counts.div(user_genre_counts.sum(axis=1) + 1e-9, axis=0).reset_index()
     profile_cols = {g: f'user_pref_{g}' for g in genre_cols}
     user_genre_profile = user_genre_profile.rename(columns=profile_cols)
+    
+    # [新增] User History 特徵基礎值：user-genre 的歷史平均評分與互動次數
+    user_genre_avg_dict = {}
+    user_genre_cnt_dict = {}
+    for g in genre_cols:
+        g_mask = train_df[g] == 1
+        user_genre_avg_dict[f'ug_avg_{g}'] = train_df[g_mask].groupby('user_id')['rating'].mean()
+        user_genre_cnt_dict[f'ug_cnt_{g}'] = train_df[g_mask].groupby('user_id').size()
+        
+    ug_avg_df = pd.DataFrame(user_genre_avg_dict).reset_index().fillna(0)
+    ug_cnt_df = pd.DataFrame(user_genre_cnt_dict).reset_index().fillna(0)
     
     def build_features(df):
         df_feat = df.merge(item_pop, on='movie_id', how='left').fillna({'popularity': 0})
@@ -170,12 +212,77 @@ def run_recommender_pipeline():
             match_series += df_feat[g] * df_feat[f'user_pref_{g}']
         df_feat['genre_match'] = match_series
         
+        # [新增] 整合 User History 特徵
+        df_feat = df_feat.merge(ug_avg_df, on='user_id', how='left')
+        df_feat = df_feat.merge(ug_cnt_df, on='user_id', how='left')
+        
+        ug_avg_cols = [f'ug_avg_{g}' for g in genre_cols]
+        ug_cnt_cols = [f'ug_cnt_{g}' for g in genre_cols]
+        
+        # 若 user 在 train 從未出現，補 0
+        df_feat[ug_avg_cols] = df_feat[ug_avg_cols].fillna(0)
+        df_feat[ug_cnt_cols] = df_feat[ug_cnt_cols].fillna(0)
+        
+        # 針對 candidate 的 genres 取出對應的歷史特徵矩陣
+        item_genres_mat = df_feat[genre_cols].values
+        ug_avg_mat = df_feat[ug_avg_cols].values
+        ug_cnt_mat = df_feat[ug_cnt_cols].values
+        
+        # 只保留與該電影對應的 genres 相關的特徵
+        active_avg_mat = ug_avg_mat * item_genres_mat
+        active_cnt_mat = ug_cnt_mat * item_genres_mat
+        
+        genre_count_per_movie = item_genres_mat.sum(axis=1) + 1e-9
+        
+        # 1. 該電影對應 genre 的 user 平均分數
+        df_feat['user_genre_avg_score'] = active_avg_mat.sum(axis=1) / genre_count_per_movie
+        # 2. 該電影對應 genre 的 user 參與總次數
+        df_feat['user_genre_total_count'] = active_cnt_mat.sum(axis=1)
+        # 3. 該電影擁有的 genre 中的最大歷史 user 評分
+        df_feat['user_genre_max_score'] = np.max(active_avg_mat, axis=1)
+        # 4. 該電影擁有的 genre 中的最大歷史參與次數
+        df_feat['user_genre_max_count'] = np.max(active_cnt_mat, axis=1)
+        
+        # 移除中介特徵，節省記憶體空間
+        df_feat = df_feat.drop(columns=ug_avg_cols + ug_cnt_cols)
+        
+        # [新增] 整合 Co-occurrence 特徵
+        u_idx = np.clip(df_feat['user_id'].astype(int).values, 0, U_max - 1)
+        m_idx = np.clip(df_feat['movie_id'].astype(int).values, 0, M_max - 1)
+        
+        cooc_sum_arr = user_cooc_sum_matrix[u_idx, m_idx]
+        cooc_max_arr = user_cooc_max_matrix[u_idx, m_idx]
+        cooc_hit_arr = user_cooc_hit_matrix[u_idx, m_idx]
+        
+        # 精準計算歷史數目並求平均共現（避免 candidate 自己也在 history 裡灌水）
+        user_seen_arr = hist_matrix[u_idx, m_idx]
+        active_hist_len = user_hist_sizes[u_idx] - user_seen_arr
+        active_hist_len[active_hist_len <= 0] = 1.0
+        
+        cooc_mean_arr = cooc_sum_arr / active_hist_len
+        
+        # 任務 1 & 2: Normalize features & 新增 hit count
+        df_feat['cooc_sum'] = np.log1p(cooc_sum_arr)
+        df_feat['cooc_max'] = np.log1p(cooc_max_arr)
+        df_feat['cooc_mean'] = np.log1p(cooc_mean_arr)
+        df_feat['cooc_hit_count'] = cooc_hit_arr
+        
+        # 任務 3: Popularity Penalty 
+        # (將名稱設為 pop_novelty，以避免覆蓋原先給 Pareto 和 NLP 模組使用的 'novelty' 欄位)
+        df_feat['pop_novelty'] = -np.log1p(df_feat['popularity'])
+        
         return df_feat
 
     train_df_feat = build_features(train_df)
     valid_df_feat = build_features(valid_df)
     test_df_feat = build_features(test_df)
-    features_to_use = ['popularity', 'user_avg_rating', 'genre_match'] + genre_cols
+    features_to_use = [
+        'popularity', 'user_avg_rating', 'genre_match',
+        'user_genre_avg_score', 'user_genre_total_count',
+        'user_genre_max_score', 'user_genre_max_count',
+        'cooc_sum', 'cooc_max', 'cooc_mean',
+        'cooc_hit_count', 'pop_novelty'
+    ] + genre_cols
     
     # ==========================================
     # 4. 訓練 LightGBM ranking model 
