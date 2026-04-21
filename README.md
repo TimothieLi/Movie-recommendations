@@ -29,24 +29,72 @@
 - **Mean NDCG@10** : ~14.10%
 *(由於特徵簡潔，這是一個理想的 Baseline)*
 
-## 執行與安裝說明 (Installation)
+## 專案結構 (Project Structure)
 
-請先確保您具有 Python 3.8+ 且有基本的 `venv` 環境。安裝步驟如下：
+```text
+大三專題/
+│── app.py                    # 完整前端互動介面入口
+│── demo_app.py               # 精簡展示版前端入口
+│── requirements.txt          # 環境依賴套件清單
+│── movie_lgb_recommender.py  # 核心資料載入、特徵工程與 LightGBM 訓練
+│── week3_features.py         # 多目標特徵工程 (新穎度、多樣性)
+│── week4_reranking.py        # 重新排序策略 (Pareto, MMR)
+│── week5_nlp_pareto.py       # TMDB 資料串接、自然語言解析與動態 Pareto
+│── week6_evaluation.py       # 系統層級評估與圖表繪製
+└── README.md                 # 專案說明文件
+```
+
+## 資料集準備 (Dataset Setup)
+
+本專案依賴兩個開源資料集。為確保程式能正確讀取資料，請依照以下說明下載並放置檔案：
+
+### 1. MovieLens 100K
+* **來源**：[GroupLens 官方下載點](https://grouplens.org/datasets/movielens/100k/) (下載 `ml-100k.zip` 並解壓縮)
+* **必需檔案**：`u.data` (使用者評分) 與 `u.item` (電影資訊)
+* **預期路徑**：建議在專案根目錄建立 `MovieLens 100K` 資料夾，並將檔案放入其內。
+* **結構範例**：
+  ```text
+  大三專題/
+  └── MovieLens 100K/
+      ├── u.data
+      └── u.item
+  ```
+*(程式兼容於根目錄下作為替代位置)*
+
+### 2. TMDB 5000 Movies Metadata (Week 5 之後需要)
+* **來源**：[Kaggle TMDB 5000 Movie Dataset](https://www.kaggle.com/datasets/tmdb/tmdb-movie-metadata)
+* **必需檔案**：`tmdb_5000_movies.csv`
+* **預期路徑**：請在專案根目錄建立 `TMDB metadata` 資料夾，並將 CSV 檔案放入其內。
+* **結構範例**：
+  ```text
+  大三專題/
+  └── TMDB metadata/
+      └── tmdb_5000_movies.csv
+  ```
+
+## 環境設定與安裝 (Setup & Installation)
+
+本專案建議使用 **Python 3.10+** 並透過 `venv` 建立獨立虛擬環境來執行。
 
 ```bash
 # 1. 進入專案資料夾
 cd 大三專題
 
-# 2. 啟動虛擬環境 (如果沒有請先 python -m venv venv)
+# 2. 建立並啟動虛擬環境
+python -m venv venv
+
+# macOS / Linux 系統請執行：
 source venv/bin/activate
+# Windows 系統請執行：
+# venv\Scripts\activate
 
-# 3. 安裝依賴 (含 Streamlit)
-pip install pandas numpy lightgbm streamlit
+# 3. 安裝所有依賴套件
+pip install -r requirements.txt
 
-# 4. 啟動前端程式
-streamlit run app.py
+# 4. 啟動 Streamlit 應用程式
+python -m streamlit run app.py
 ```
-> 註：執行前請確保此資料夾下有 `MovieLens 100K` 資料集 (包含 `u.data` 及 `u.item`)。
+> 註：執行前請確保此資料夾下有 `MovieLens 100K` 資料集 (包含 `u.data` 及 `u.item`)，以及相關 TMDB 資料集。
 
 ## 最新進度：Week 3 & Week 4 演算法升級
 
@@ -114,3 +162,17 @@ python -m streamlit run demo_app.py
 ## 未來展望
 - 嘗試將現行 LambdaRank 架構神經網路化 (Deep Learning Ranking Models)。
 - 支援真實使用者歷史即時操作的回饋迴圈 (Online Learning)。
+
+## 可重現性聲明 (Reproducibility)
+
+本專案致力於維持公開運行的可重現性：
+1. 專案的執行依賴已統一列於 `requirements.txt` 中。
+2. 開發與驗證均建議於隔離的虛擬環境 (venv) 下進行。
+3. 本專案已於開發環境進行基本功能測試；為確保推薦系統模型能正確運行，使用者需嚴格依照上方【資料集準備】的說明配置相關資料檔案。
+
+### 建議驗證步驟
+
+為確認您的環境是否建置完備，建議新使用者可透過以下流程自行驗證：
+1. **建立乾淨環境**：開啓終端機並建立全新的虛擬環境 (`python -m venv venv`)。
+2. **安裝相依套件**：啟動環境後執行 `pip install -r requirements.txt`。
+3. **啟動前端應用**：執行 `python -m streamlit run app.py`；若順利進入網頁且無出現模組遺漏錯誤或資料路徑報錯，即視為驗證成功。
