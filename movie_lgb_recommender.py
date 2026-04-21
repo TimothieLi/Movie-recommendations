@@ -4,6 +4,8 @@ import numpy as np
 import lightgbm as lgb
 import warnings
 from collections import defaultdict
+import matplotlib.pyplot as plt
+from mf_features import train_mf_model, predict_mf_score
 
 warnings.filterwarnings("ignore")
 
@@ -50,7 +52,7 @@ def ndcg_at_k(actual_dict, predicted_list, k=10):
         return 0.0
     return dcg / idcg
 
-def run_recommender_pipeline():
+def run_recommender_pipeline(alpha=1.0, mf_weight=1.0, return_metrics=False, calc_importance=False):
     # ==========================================
     # 1. 資料前處理 (Data Preprocessing)
     # ==========================================
@@ -144,6 +146,10 @@ def run_recommender_pipeline():
     # 3. 特徵工程 (Feature Engineering)
     # ==========================================
     print("Feature Engineering...")
+    
+    # [新增] 訓練 Matrix Factorization 擷取 Latent Features (僅使用 train_df)
+    mf_model = train_mf_model(train_df)
+    
     # [Item Feature] Popularity：電影在 train set 中的互動/被評分次數
     item_pop = train_df.groupby('movie_id').size().reset_index(name='popularity')
     # [User Feature] 使用者平均評分
@@ -197,7 +203,7 @@ def run_recommender_pipeline():
     ug_avg_df = pd.DataFrame(user_genre_avg_dict).reset_index().fillna(0)
     ug_cnt_df = pd.DataFrame(user_genre_cnt_dict).reset_index().fillna(0)
     
-    def build_features(df):
+    def build_features(df, current_alpha=1.0, current_mf_weight=1.0):
         df_feat = df.merge(item_pop, on='movie_id', how='left').fillna({'popularity': 0})
         df_feat = df_feat.merge(user_avg, on='user_id', how='left')
         global_mean = train_df['rating'].mean()
@@ -269,19 +275,24 @@ def run_recommender_pipeline():
         
         # 任務 3: Popularity Penalty 
         # (將名稱設為 pop_novelty，以避免覆蓋原先給 Pareto 和 NLP 模組使用的 'novelty' 欄位)
-        df_feat['pop_novelty'] = -np.log1p(df_feat['popularity'])
+        df_feat['pop_novelty'] = -current_alpha * np.log1p(df_feat['popularity'])
+        
+        # [新增] 整合 Matrix Factorization (Latent Features)
+        mf_scores = predict_mf_score(mf_model, df_feat['user_id'].values, df_feat['movie_id'].values)
+        df_feat['mf_score_raw'] = mf_scores
+        df_feat['mf_score'] = current_mf_weight * df_feat['mf_score_raw']
         
         return df_feat
 
-    train_df_feat = build_features(train_df)
-    valid_df_feat = build_features(valid_df)
-    test_df_feat = build_features(test_df)
+    train_df_feat = build_features(train_df, current_alpha=alpha, current_mf_weight=mf_weight)
+    valid_df_feat = build_features(valid_df, current_alpha=alpha, current_mf_weight=mf_weight)
+    test_df_feat = build_features(test_df, current_alpha=alpha, current_mf_weight=mf_weight)
     features_to_use = [
         'popularity', 'user_avg_rating', 'genre_match',
         'user_genre_avg_score', 'user_genre_total_count',
         'user_genre_max_score', 'user_genre_max_count',
         'cooc_sum', 'cooc_max', 'cooc_mean',
-        'cooc_hit_count', 'pop_novelty'
+        'cooc_hit_count', 'pop_novelty', 'mf_score'
     ] + genre_cols
     
     # ==========================================
@@ -344,7 +355,7 @@ def run_recommender_pipeline():
     valid_candidates_df = pd.DataFrame({'user_id': valid_user_ids_rep, 'movie_id': valid_movie_ids_rep})
     valid_candidates_df = valid_candidates_df.merge(movies_df, on='movie_id', how='left')
     
-    valid_candidates_feat = build_features(valid_candidates_df)
+    valid_candidates_feat = build_features(valid_candidates_df, current_alpha=alpha, current_mf_weight=mf_weight)
     valid_candidates_feat['predict_score'] = model.predict(valid_candidates_feat[features_to_use])
     
     # 針對 validation 評估，只排除 train set 中看過的電影
@@ -377,6 +388,92 @@ def run_recommender_pipeline():
     print(f"Mean NDCG@10   : {avg_valid_ndcg:.2f}%")
 
     # ==========================================
+    # 4.6. 特徵重要性分析 (Feature Importance)
+    # ==========================================
+    if calc_importance:
+        importances = model.feature_importance()
+        feature_names = model.feature_name()
+    
+        feat_imp_df = pd.DataFrame({
+            'feature': feature_names,
+            'importance': importances
+        }).sort_values(by='importance', ascending=False)
+    
+        print("\nTop Feature Importance")
+        print("---------------------")
+        for _, row in feat_imp_df.head(15).iterrows():
+            print(f"{row['feature']} : {row['importance']}")
+    
+        plt.figure(figsize=(10, 8))
+        top_20_imp = feat_imp_df.head(20).sort_values(by='importance', ascending=True)
+        plt.barh(top_20_imp['feature'], top_20_imp['importance'])
+        plt.title('LightGBM Feature Importance (Split)')
+        plt.xlabel('Importance')
+        plt.ylabel('Feature Name')
+        plt.tight_layout()
+        plt.savefig('feature_importance_lgb.png')
+        plt.close()
+    
+        # ==========================================
+        # 4.7. Permutation Importance 分析 (Validation)
+        # ==========================================
+        baseline_ndcg = avg_valid_ndcg / 100.0
+        perm_results = []
+        
+        eval_df = valid_unseen_candidates.copy()
+        
+        for feat in features_to_use:
+            orig_col = eval_df[feat].values.copy()
+            
+            shuffled_col = orig_col.copy()
+            np.random.shuffle(shuffled_col)
+            eval_df[feat] = shuffled_col
+            
+            # 重新 predict
+            eval_df['predict_score'] = model.predict(eval_df[features_to_use])
+            
+            # 重新排序挑 Top 10
+            eval_sorted = eval_df.sort_values(['user_id', 'predict_score'], ascending=[True, False])
+            eval_top_10 = eval_sorted.groupby('user_id').head(10)
+            eval_preds = eval_top_10.groupby('user_id')['movie_id'].apply(list).to_dict()
+            
+            # 計算 shuffled NDCG
+            pf_ndcgs = []
+            for uid in valid_users:
+                if uid not in valid_ground_truth: continue
+                actual = valid_ground_truth[uid]
+                preds = eval_preds.get(uid, [])
+                pf_ndcgs.append(ndcg_at_k(actual, preds, k=10))
+                
+            shuffled_ndcg = np.mean(pf_ndcgs)
+            drop_ndcg = baseline_ndcg - shuffled_ndcg
+            
+            perm_results.append({
+                'feature': feat,
+                'importance': drop_ndcg
+            })
+            
+            # 還原欄位
+            eval_df[feat] = orig_col
+            
+        perm_df = pd.DataFrame(perm_results).sort_values(by='importance', ascending=False)
+        
+        print("\nPermutation Feature Importance")
+        print("-----------------------------")
+        for _, row in perm_df.head(20).iterrows():
+            print(f"{row['feature']} : {row['importance']:.6f}")
+            
+        plt.figure(figsize=(10, 8))
+        top_20_perm = perm_df.head(20).sort_values(by='importance', ascending=True)
+        plt.barh(top_20_perm['feature'], top_20_perm['importance'])
+        plt.title('Permutation Importance (Drop in NDCG@10)')
+        plt.xlabel('Importance (Decrease in NDCG)')
+        plt.ylabel('Feature Name')
+        plt.tight_layout()
+        plt.savefig('feature_importance_permutation.png')
+        plt.close()
+
+    # ==========================================
     # 5. 週 2 評估任務：對 Test Set 中所有 User 進行評估
     # ==========================================
     print("\nEvaluating all users in test set for Recall@10 and NDCG@10 (Batch Strategy)...")
@@ -396,7 +493,7 @@ def run_recommender_pipeline():
     candidates_df = candidates_df.merge(movies_df, on='movie_id', how='left')
     
     # 批次提取特徵 (比一個一個 user 迴圈快上百倍)
-    candidates_feat = build_features(candidates_df)
+    candidates_feat = build_features(candidates_df, current_alpha=alpha, current_mf_weight=mf_weight)
     
     # 一次對多達百萬等級的 rows 進行 Rank Score 預測！
     candidates_feat['predict_score'] = model.predict(candidates_feat[features_to_use])
@@ -439,28 +536,95 @@ def run_recommender_pipeline():
     print(f"Mean NDCG@10   : {avg_ndcg:.2f}%")
     print("==========================================\n")
     
+    if return_metrics:
+        return test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates, avg_valid_recall, avg_valid_ndcg, avg_recall, avg_ndcg
     return test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates
 
 def main():
-    test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates = run_recommender_pipeline()
+    # 固定 alpha 為 0.5 (假設這是之前跑出相對穩定的值)
+    fixed_alpha = 0.5
+    mf_weight_list = [0.3, 0.5, 0.7, 1.0]
+    results = []
     
-    # ==========================================
-    # 7. 額外印出幾位 user 的推薦結果，幫助檢查結果是否合理
-    # ==========================================
-    sample_users = test_users[:2] # 挑選前 2 位測試集中的 User 作為範例
+    print("\n==========================================")
+    print("Starting MF Weight Sweep Experiment")
+    print("==========================================")
     
-    for uid in sample_users:
-        print(f"\n--- [Top-10 Recommended Movies for User {uid}] ---")
-        user_top_movies = top_10_df[top_10_df['user_id'] == uid]
-        actual_interactions = test_ground_truth[uid]
-        actual_liked = [m for m, r in actual_interactions.items() if r >= 3.0]
+    final_test_users, final_top_10_df, final_test_ground_truth = None, None, None
+    
+    for i, w in enumerate(mf_weight_list):
+        print(f"\n>>> Running pipeline with mf_weight = {w} (alpha = {fixed_alpha})")
+        # 只在最後一次跑 permutation importance, 避免過度花費時間
+        run_importance = (i == len(mf_weight_list) - 1)
+        ret = run_recommender_pipeline(alpha=fixed_alpha, mf_weight=w, return_metrics=True, calc_importance=run_importance)
         
-        for rank, row in enumerate(user_top_movies.itertuples(), 1):
-            hit_mark = ""
-            if row.movie_id in actual_liked:
-                hit_mark = f"⭐ [Hit! Test Rating: {actual_interactions[row.movie_id]:.0f}]"
-                
-            print(f"Rank {rank}: [Score={row.predict_score:.4f}] {row.movie_title} {hit_mark}")
+        # Unpack
+        t_users, t_top10, t_gt, t_mdf, t_unseen = ret[:5]
+        v_rec, v_ndcg, t_rec, t_ndcg = ret[5:]
+        
+        results.append({
+            'mf_weight': w,
+            'val_recall': v_rec,
+            'val_ndcg': v_ndcg,
+            'test_recall': t_rec,
+            'test_ndcg': t_ndcg
+        })
+        
+        final_test_users = t_users
+        final_top_10_df = t_top10
+        final_test_ground_truth = t_gt
+        
+    results_df = pd.DataFrame(results)
+    
+    print("\nMF Weight Sweep Results")
+    print("-----------------------")
+    for _, row in results_df.iterrows():
+        w = row['mf_weight']
+        print(f"mf_weight={w} -> Recall={row['val_recall']:.2f}%, NDCG={row['val_ndcg']:.2f}% (Val) | Recall={row['test_recall']:.2f}%, NDCG={row['test_ndcg']:.2f}% (Test)")
+        
+    # Plotting
+    plt.figure(figsize=(12, 5))
+    
+    # Plot 1: Recall vs MF Weight
+    plt.subplot(1, 2, 1)
+    plt.plot(results_df['mf_weight'], results_df['val_recall'], marker='o', label='Validation Recall@10')
+    plt.plot(results_df['mf_weight'], results_df['test_recall'], marker='s', label='Test Recall@10')
+    plt.title('Recall vs MF Weight')
+    plt.xlabel('MF Weight')
+    plt.ylabel('Recall@10 (%)')
+    plt.grid(True)
+    plt.legend()
+    
+    # Plot 2: NDCG vs MF Weight
+    plt.subplot(1, 2, 2)
+    plt.plot(results_df['mf_weight'], results_df['val_ndcg'], marker='o', label='Validation NDCG@10')
+    plt.plot(results_df['mf_weight'], results_df['test_ndcg'], marker='s', label='Test NDCG@10')
+    plt.title('NDCG vs MF Weight')
+    plt.xlabel('MF Weight')
+    plt.ylabel('NDCG@10 (%)')
+    plt.grid(True)
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig('mf_weight_sweep_results.png')
+    print("\nSweep results plot saved to 'mf_weight_sweep_results.png'.")
+    
+    # ==========================================
+    # 7. 額外印出幾位 user 的推薦結果，幫助檢查結果是否合理 (採用最後一個 weight)
+    # ==========================================
+    if final_test_users is not None:
+        sample_users = final_test_users[:2] 
+        for uid in sample_users:
+            print(f"\n--- [Top-10 Recommended Movies for User {uid}] (mf_weight={mf_weight_list[-1]}) ---")
+            user_top_movies = final_top_10_df[final_top_10_df['user_id'] == uid]
+            actual_interactions = final_test_ground_truth[uid]
+            actual_liked = [m for m, r in actual_interactions.items() if r >= 3.0]
+            
+            for rank, row in enumerate(user_top_movies.itertuples(), 1):
+                hit_mark = ""
+                if row.movie_id in actual_liked:
+                    hit_mark = f"⭐ [Hit! Test Rating: {actual_interactions[row.movie_id]:.0f}]"
+                print(f"Rank {rank}: [Score={row.predict_score:.4f}] {row.movie_title} {hit_mark}")
 
 if __name__ == "__main__":
     main()
