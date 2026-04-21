@@ -125,16 +125,19 @@ def run_recommender_pipeline():
             movies_df[col] = 0.5
     
     # ==========================================
-    # 2. 資料切分 (Train/Test Split 80/20)
+    # 2. 資料切分 (Train/Validation/Test Split 80/10/10)
     # ==========================================
     ratings_df = ratings_df.sort_values('timestamp').reset_index(drop=True)
-    split_idx = int(len(ratings_df) * 0.8)
+    train_end = int(len(ratings_df) * 0.8)
+    valid_end = int(len(ratings_df) * 0.9)
     
-    train_df = ratings_df.iloc[:split_idx].copy()
-    test_df = ratings_df.iloc[split_idx:].copy()
+    train_df = ratings_df.iloc[:train_end].copy()
+    valid_df = ratings_df.iloc[train_end:valid_end].copy()
+    test_df = ratings_df.iloc[valid_end:].copy()
     
     # 結合 rating 與 movie metadata 用於建立特徵
     train_df = train_df.merge(movies_df, on='movie_id', how='left')
+    valid_df = valid_df.merge(movies_df, on='movie_id', how='left')
     test_df = test_df.merge(movies_df, on='movie_id', how='left')
     
     # ==========================================
@@ -170,6 +173,7 @@ def run_recommender_pipeline():
         return df_feat
 
     train_df_feat = build_features(train_df)
+    valid_df_feat = build_features(valid_df)
     test_df_feat = build_features(test_df)
     features_to_use = ['popularity', 'user_avg_rating', 'genre_match'] + genre_cols
     
@@ -177,17 +181,20 @@ def run_recommender_pipeline():
     # 4. 訓練 LightGBM ranking model 
     # ==========================================
     train_df_feat = train_df_feat.sort_values('user_id').reset_index(drop=True)
+    valid_df_feat = valid_df_feat.sort_values('user_id').reset_index(drop=True)
     test_df_feat = test_df_feat.sort_values('user_id').reset_index(drop=True)
     
     train_groups = train_df_feat.groupby('user_id').size().values
+    valid_groups = valid_df_feat.groupby('user_id').size().values
     test_groups = test_df_feat.groupby('user_id').size().values
     
     X_train, y_train = train_df_feat[features_to_use], train_df_feat['rating']
+    X_valid, y_valid = valid_df_feat[features_to_use], valid_df_feat['rating']
     X_test,  y_test  = test_df_feat[features_to_use], test_df_feat['rating']
     
     print("Building and Training LightGBM LambdaRank Model...")
     lgb_train = lgb.Dataset(X_train, label=y_train, group=train_groups)
-    lgb_eval = lgb.Dataset(X_test, label=y_test, group=test_groups, reference=lgb_train)
+    lgb_valid = lgb.Dataset(X_valid, label=y_valid, group=valid_groups, reference=lgb_train)
     
     params = {
         'objective': 'lambdarank',
@@ -204,15 +211,63 @@ def run_recommender_pipeline():
         callbacks = [lgb.early_stopping(stopping_rounds=20), lgb.log_evaluation(period=20)]
         model = lgb.train(
             params, lgb_train, num_boost_round=300,
-            valid_sets=[lgb_train, lgb_eval], callbacks=callbacks
+            valid_sets=[lgb_train, lgb_valid], callbacks=callbacks
         )
     except AttributeError: # Fallback for older variations
         model = lgb.train(
             params, lgb_train, num_boost_round=300,
-            valid_sets=[lgb_train, lgb_eval],
+            valid_sets=[lgb_train, lgb_valid],
             early_stopping_rounds=20, verbose_eval=20
         )
     print("\nModel training finished!")
+
+    # ==========================================
+    # 4.5. Validation 評估：針對 Validation Set 中所有 User 進行評估
+    # ==========================================
+    print("\nEvaluating all users in validation set for Recall@10 and NDCG@10...")
+    valid_users = valid_df['user_id'].unique()
+    
+    valid_ground_truth = defaultdict(dict)
+    for _, row in valid_df.iterrows():
+        valid_ground_truth[row['user_id']][row['movie_id']] = row['rating']
+        
+    valid_user_ids_rep = np.repeat(valid_users, len(movies_df))
+    valid_movie_ids_rep = np.tile(movies_df['movie_id'].values, len(valid_users))
+    
+    valid_candidates_df = pd.DataFrame({'user_id': valid_user_ids_rep, 'movie_id': valid_movie_ids_rep})
+    valid_candidates_df = valid_candidates_df.merge(movies_df, on='movie_id', how='left')
+    
+    valid_candidates_feat = build_features(valid_candidates_df)
+    valid_candidates_feat['predict_score'] = model.predict(valid_candidates_feat[features_to_use])
+    
+    # 針對 validation 評估，只排除 train set 中看過的電影
+    train_seen_valid_df = train_df[['user_id', 'movie_id']].copy()
+    train_seen_valid_df['seen'] = 1
+    valid_candidates_feat = valid_candidates_feat.merge(train_seen_valid_df, on=['user_id', 'movie_id'], how='left')
+    valid_unseen_candidates = valid_candidates_feat[valid_candidates_feat['seen'].isnull()].drop('seen', axis=1)
+    
+    valid_unseen_candidates = valid_unseen_candidates.sort_values(['user_id', 'predict_score'], ascending=[True, False])
+    valid_top_10_df = valid_unseen_candidates.groupby('user_id').head(10)
+    valid_top_10_preds = valid_top_10_df.groupby('user_id')['movie_id'].apply(list).to_dict()
+    
+    valid_recalls = []
+    valid_ndcgs = []
+    for uid in valid_users:
+        if uid not in valid_ground_truth: continue
+        actual = valid_ground_truth[uid]
+        preds = valid_top_10_preds.get(uid, [])
+        
+        valid_recalls.append(recall_at_k(actual, preds, k=10, threshold=3.0))
+        valid_ndcgs.append(ndcg_at_k(actual, preds, k=10))
+        
+    avg_valid_recall = np.mean(valid_recalls) * 100
+    avg_valid_ndcg = np.mean(valid_ndcgs) * 100
+    
+    print("\n==========================================")
+    print("Validation Performance")
+    print("==========================================")
+    print(f"Mean Recall@10 : {avg_valid_recall:.2f}%")
+    print(f"Mean NDCG@10   : {avg_valid_ndcg:.2f}%")
 
     # ==========================================
     # 5. 週 2 評估任務：對 Test Set 中所有 User 進行評估
@@ -239,10 +294,13 @@ def run_recommender_pipeline():
     # 一次對多達百萬等級的 rows 進行 Rank Score 預測！
     candidates_feat['predict_score'] = model.predict(candidates_feat[features_to_use])
     
-    # 過濾掉該名使用者在 Train Set 中已經看過的電影
-    train_seen_df = train_df[['user_id', 'movie_id']].copy()
-    train_seen_df['seen'] = 1
-    candidates_feat = candidates_feat.merge(train_seen_df, on=['user_id', 'movie_id'], how='left')
+    # 過濾掉該名使用者在 Train Set 與 Validation Set 中已經看過的電影
+    seen_df = pd.concat([
+        train_df[['user_id', 'movie_id']],
+        valid_df[['user_id', 'movie_id']]
+    ]).drop_duplicates()
+    seen_df['seen'] = 1
+    candidates_feat = candidates_feat.merge(seen_df, on=['user_id', 'movie_id'], how='left')
     unseen_candidates = candidates_feat[candidates_feat['seen'].isnull()].drop('seen', axis=1)
     
     # 針對各個使用者將分數由高到低排序，並取出 Top-10 電影清單
