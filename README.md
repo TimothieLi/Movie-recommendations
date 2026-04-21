@@ -41,6 +41,7 @@
 │── week4_reranking.py        # 重新排序策略 (Pareto, MMR)
 │── week5_nlp_pareto.py       # TMDB 資料串接、自然語言解析與動態 Pareto
 │── week6_evaluation.py       # 系統層級評估與圖表繪製
+│── mf_features.py            # 純 Numpy 實作的 Matrix Factorization 模組
 └── README.md                 # 專案說明文件
 ```
 
@@ -121,6 +122,10 @@ python -m streamlit run app.py
   - **大規模批次比較**：在相同候選池（前 50 名）與 Top-10 條件下，對 LightGBM Baseline、MMR（五種 λ）、Pareto 及四種 NLP 目標組合進行全面 Batch 評測。
   - **Trade-off 視覺化**：以 Seaborn 散佈圖繪製 `NDCG vs Novelty` 及 `NDCG vs ILD (Diversity)` 對決，清楚展現不同方法在準確度與多元性之間的取捨。
   - 評估腳本：`week6_evaluation.py`。
+
+- **👉 Week 7: 特徵工程進階與 Matrix Factorization**
+  - **Feature Importance & Sweep**：整合 LightGBM 內建的特徵重要性 (Split) 與自訂的 Permutation Importance 來檢驗每個特徵的實質影響力（如：NDCG Drop）；並實作了全自動化的參數掃描 (Parameter Sweeps) 來尋找最佳的流行度懲罰權重 (`alpha`)。
+  - **Pure Numpy Matrix Factorization**：為了避免在不同作業系統間編譯 C++ （如 Surprise 套件）造成的環境錯誤，團隊手刻了一套純依賴 Numpy 且訓練極快（只需數秒）的 SGD Latent Preference 模型 (`mf_features.py`)，將提取出的 MF 分配權重 (`mf_weight`)，再送到下游的 LightGBM 進行進階排序，有效提升 Recall。
 
 這五個階段的成果完整地串接並整合於 Streamlit 互動介面中，隨時可以進行網頁互動展示！
 
