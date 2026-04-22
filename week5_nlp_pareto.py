@@ -22,32 +22,66 @@ def parse_query(query: str) -> list:
         
     return objectives
 
-def dynamic_pareto_rerank(user_candidates, genre_cols, objectives, k=10, pool_size=None):
+def dynamic_pareto_rerank(user_candidates, genre_cols, objectives, k=10, pool_size=None, tie_break='relevance'):
     """
-    Dynamic Pareto Re-ranking 
-    - 支援動態更新 diversity
-    - preference 為 baseline 指標
+    Dynamic Pareto Re-ranking（雙階段設計，支援 NLP 動態目標）
+
+    ════════════════════════════════════════════════════════════
+    【第一階段】Pareto Filtering（Pareto 的角色：篩選）
+    ────────────────────────────────────────────────────────────
+      - 支援動態多目標（novelty, diversity, recency, quality）
+      - preference（正規化後的 predict_score）永遠作為基準目標之一
+      - diversity 在每輪迭代中動態計算（基於已選集合的 Jaccard 距離）
+      - Pareto 只決定「哪些 item 被選中」，不決定最終排序！
+
+    【第二階段】Tie-break Sorting（Tie-break 的角色：排序）
+    ────────────────────────────────────────────────────────────
+      - 在 Pareto front 收集完畢後，對已選集合進行全局重排序
+      - 解決 Pareto 本身不定義最終排序的問題，提升 NDCG 表現
+      - 支援兩種策略（透過 tie_break 參數選擇）：
+          * 'relevance'：以 predict_score 由高到低排序（預設）
+          * 'weighted' ：加權排序，
+                         final_score = 0.7 * predict_score_norm
+                                     + 0.3 * novelty_norm
+    ════════════════════════════════════════════════════════════
+
+    Parameters
+    ----------
+    user_candidates : pd.DataFrame
+        候選電影 DataFrame。
+    genre_cols : list
+        電影類型欄位名稱列表，用於計算 diversity。
+    objectives : list
+        動態目標列表，由 parse_query() 生成（如 ['novelty', 'diversity']）。
+    k : int
+        最終推薦數量（Top-K）。
+    pool_size : int or None
+        Pareto 篩選候選池大小，預設為 max(50, k*2)。
+    tie_break : str
+        Tie-break 排序策略，可選 'relevance'（預設）或 'weighted'。
     """
     if pool_size is None:
         pool_size = max(50, k * 2)
-        
+
     df = user_candidates.sort_values('predict_score', ascending=False).head(pool_size).copy().reset_index(drop=True)
-    
-    # 正規化 Preference
+
+    # 正規化 Preference（作為 Pareto 的基準目標之一）
     scaler = MinMaxScaler()
     df['preference'] = scaler.fit_transform(df[['predict_score']])
-    
-    # 如果 user_candidates 裡面有些特徵是空的(剛好缺失)，在這裡預防性做個 0.0
+
+    # 確保各目標欄位存在，缺失時補 0.0
     for obj in ['novelty', 'recency', 'quality']:
         if obj not in df.columns:
             df[obj] = 0.0
-            
-    # 【3】確認 recency 正確存在
+
+    # 確認 recency 正確存在
     if 'recency' not in df.columns or df['recency'].sum() == 0:
         print("Warning: recency feature is missing or all zeros!")
-        
-    # 【2】新增「單一目標優先排序」機制
-    # 當只追求單一靜態目標 (非 diversity) 時，直接依目標排序，再以 preference 當次排序
+
+    # ──────────────────────────────────────────────
+    # 【第一階段】Pareto Filtering - 單一靜態目標捷徑
+    # 當只追求單一靜態目標（非 diversity）時，直接排序，無需 Pareto 迭代
+    # ──────────────────────────────────────────────
     if len(objectives) == 1 and objectives[0] in ['recency', 'novelty', 'quality']:
         target_obj = objectives[0]
         final_df = df.sort_values([target_obj, 'preference'], ascending=[False, False]).head(k).copy()
@@ -123,10 +157,35 @@ def dynamic_pareto_rerank(user_candidates, genre_cols, objectives, k=10, pool_si
         selected_indices.append(best_idx)
         unselected_indices.remove(best_idx)
         
+    # ──────────────────────────────────────────────
+    # 【第二階段】Tie-break Sorting（新增）
+    # 對 Pareto front 進行全局重排序，提升 NDCG
+    # ──────────────────────────────────────────────
     final_df = df.loc[selected_indices].copy()
+
+    if tie_break == 'weighted':
+        # 加權策略：normalize predict_score 後加權合併 novelty_norm（若存在）
+        novelty_col = 'novelty_norm' if 'novelty_norm' in final_df.columns else 'novelty'
+        if novelty_col not in final_df.columns:
+            final_df[novelty_col] = 0.0
+        tb_scaler = MinMaxScaler()
+        final_df = final_df.copy()
+        final_df['_predict_score_norm'] = tb_scaler.fit_transform(final_df[['predict_score']])
+        final_df['_tiebreak_score'] = (
+            0.7 * final_df['_predict_score_norm'] +
+            0.3 * final_df[novelty_col]
+        )
+        final_df = final_df.sort_values('_tiebreak_score', ascending=False)
+        final_df.drop(columns=['_predict_score_norm', '_tiebreak_score'], inplace=True)
+    else:
+        # 預設：relevance 策略，直接以 predict_score 由高到低排序
+        final_df = final_df.sort_values('predict_score', ascending=False)
+
+    # 重新指派最終推薦排名
+    final_df = final_df.reset_index(drop=True)
     final_df['pareto_rank'] = range(1, len(final_df) + 1)
-    
+
     if 'diversity' not in final_df.columns:
         final_df['diversity'] = 0.0
-        
+
     return final_df

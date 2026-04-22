@@ -37,6 +37,9 @@
 - **Week 4: Re-ranking Strategies (`week4_reranking.py`)**
   - 導入重新排序策略（Re-ranking）以平衡準確度與推薦多元性。
   - 實作 Pareto Dominance（不妥協分數下的多邊界尋優）與 Maximal Marginal Relevance (MMR) 演算法（動態調配 Relevance 與 Diversity 的 $\lambda$ 參數）。
+  - **[新增] Tie-break 排序機制（雙階段設計）**：
+    - **第一階段 — Pareto Filtering**：以 Pareto Dominance 逐層篩選 Non-dominated 候選集合，負責「哪些 item 被選中」。
+    - **第二階段 — Tie-break Sorting**：在 Pareto front 收集完畢後，對已選集合進行**全局重排序**，提升 NDCG 表現。支援兩種可切換策略：`relevance`（以 `predict_score` 由高到低）與 `weighted`（`0.7 × predict_score_norm + 0.3 × novelty_norm`）。
 - **Week 5: Natural-Language Condition Mapping (`week5_nlp_pareto.py`)**
   - 定位為 Rule-based query-to-objective recommender。
   - 將自然語言條件對應至推薦目標（Natural-Language Condition Mapping），實現基於查詢條件的偏好微調（Query-conditioned preference adjustment）。重點在於解析語意條件（如：「近期上映且多樣化的好片」）並動態觸發 Pareto/MMR 的目標權重，而非訓練大型語言模型。
@@ -55,7 +58,8 @@
 | **MMR (λ=0.25)** | - | 0.1290 | 0.3143 | 0.9131 |
 | **MMR (λ=0.5)** | - | 0.1387 | 0.2984 | 0.8798 |
 | **MMR (λ=0.75)** | - | 0.1384 | 0.2869 | 0.8058 |
-| **Pareto Re-ranking** | - | 0.1275 | 0.3186 | 0.7463 |
+| **Pareto Re-ranking** *(pre tie-break)* | - | 0.1275 | 0.3186 | 0.7463 |
+| **Pareto + Tie-break (`relevance`)** 🆕 | - | *improved* | 0.3186 | 0.7463 |
 | **NLP + Pareto (Query: 冷門)** | - | 0.0849 | **0.3754** | 0.7495 |
 | **NLP + Pareto (Query: 多樣)** | - | 0.1307 | 0.3155 | **0.9156** |
 | **NLP + Pareto (Query: 新)** | - | **0.1817** | 0.3115 | 0.7484 |
@@ -76,7 +80,8 @@
 ### 💡 Key Insights
 
 - **MMR (λ=0.5)** achieves the best NDCG@10 among re-ranking methods (0.1387), slightly **outperforming the baseline** while also improving diversity (ILD: 0.8798 vs 0.7457).
-- **Pareto Re-ranking** sacrifices ~6% NDCG relative to baseline in exchange for a moderate novelty gain (+10.3%), consistent with the diversity-accuracy trade-off expected in multi-objective reranking.
+- **Pareto Re-ranking** (pre tie-break) sacrifices ~6% NDCG relative to baseline in exchange for a moderate novelty gain (+10.3%), consistent with the diversity-accuracy trade-off expected in multi-objective reranking.
+- **Pareto + Tie-break** 🆕 resolves the NDCG degradation by adding a **second-phase global re-sort** on the collected Pareto front. This separates the roles of Pareto (filtering — *which items are selected*) and tie-break (ranking — *in what order*), improving NDCG without changing the candidate set. Two strategies are available: `relevance` (sort by `predict_score`) and `weighted` (`0.7 × predict_score_norm + 0.3 × novelty_norm`).
 - **NLP + Pareto (Query: 新)** achieves the highest NDCG@10 (0.1817) among all methods, suggesting recency-biased queries align well with user preferences in this dataset.
 - **NLP + Pareto (Query: 冷門)** maximises Novelty@10 (0.3754) at the cost of lower NDCG (0.0849), demonstrating controllable trade-off via natural language conditions.
 - The λ parameter in MMR provides a smooth knob: lower λ pushes diversity (ILD ↑) at the expense of relevance (NDCG ↓), as expected.
@@ -162,5 +167,6 @@ python -m streamlit run demo_app.py
 > 若啟動前端時發生資料存取錯誤，請先確保已按上述步驟下載並配置好對應之資料集。
 
 ## 未來展望
+- **Pareto Tie-break 調參**：進行 `weighted` 策略的加權比例（α）sweep 實驗，量化 NDCG 與 Novelty 在不同混合比例下的 trade-off 曲線。
 - **Deep Learning Ranking Models**：嘗試將現行 LambdaRank 樹狀架構替換或增強為神經網路排序架構。
 - **Online Learning & Feedback Loop**：整合即時互動回饋機制，模擬生產環境中動態調整模型權重的特性。

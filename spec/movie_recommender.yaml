@@ -1,5 +1,5 @@
 # OpenSpec: Movie Recommendation System
-version: 1.0
+version: 1.1
 
 project:
   name: "Movie Recommendation System"
@@ -39,6 +39,13 @@ extension_modules:
     name: "Re-ranking Strategies"
     script: "week4_reranking.py"
     description: "Implements Pareto Dominance and Maximal Marginal Relevance (MMR) strategies to balance accuracy with recommendation diversity."
+    enhancements:
+      tie_break_sorting:
+        description: "Two-phase Pareto design: Phase 1 (Pareto Filtering) selects candidates via dominance layering; Phase 2 (Tie-break Sorting) globally re-sorts the collected Pareto front to improve NDCG without altering which items are selected."
+        strategies:
+          relevance: "Sort Pareto front by predict_score descending (default)."
+          weighted: "Sort by weighted score: 0.7 * predict_score_norm + 0.3 * novelty_norm."
+        parameter: "tie_break='relevance' | 'weighted'"
   week5:
     name: "Natural Language Query-to-Objective Mapping"
     script: "week5_nlp_pareto.py"
