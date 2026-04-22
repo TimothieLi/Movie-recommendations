@@ -276,6 +276,8 @@ elif page_selection == "📈 方法比較與分析 (Week 6)":
         from week6_evaluation import run_week6_experiments
         import matplotlib.pyplot as plt
         import seaborn as sns
+        import random
+        RANDOM_SEED = 42
         
         genre_cols = [
             "unknown", "Action", "Adventure", "Animation",
@@ -284,9 +286,22 @@ elif page_selection == "📈 方法比較與分析 (Week 6)":
             "Thriller", "War", "Western"
         ]
         
-        # 取隨機或排序過的部分樣本 (這裡為求穩定取排序前 N 名)
-        test_users_subset = sorted([int(u) for u in test_users])[:sample_size]
+        # Fixed-seed random sampling：從全體 test users 中隨機抽出 sample_size 位使用者。
+        # 若 sample_size >= 全體數量則直接使用所有 test users，不呼叫 random.sample() 避免報錯。
+        # sorted() 僅為顯示與除錯穩定性，不代表抽樣方式本身。
+        all_test_users = [int(u) for u in test_users]
+        if sample_size >= len(all_test_users):
+            test_users_subset = sorted(all_test_users)
+        else:
+            rng = random.Random(RANDOM_SEED)
+            test_users_subset = sorted(rng.sample(all_test_users, sample_size))
         total_movies = len(movies_df)
+
+        st.info(
+            f"📌 **抽樣說明**：本次評測採用 **Fixed-seed Random Sampling**（seed = {RANDOM_SEED}），"
+            f"從全體 {len(all_test_users)} 位 Test Users 中隨機抽取 {len(test_users_subset)} 位進行評估，"
+            "而非依 User ID 排序取前 N 名，以確保無 sample bias 且結果可重現。"
+        )
         
         progress_bar = st.progress(0.0)
         status_text = st.empty()

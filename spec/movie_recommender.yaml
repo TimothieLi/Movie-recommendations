@@ -1,0 +1,96 @@
+# OpenSpec: Movie Recommendation System
+version: 1.0
+
+project:
+  name: "Movie Recommendation System"
+  goal: "Build a robust hybrid recommendation system focusing on multi-objective optimization, bridging the gap between baseline relevance and diverse user needs."
+  task_type:
+    - "movie recommendation"
+    - "learning-to-rank"
+    - "multi-objective reranking"
+
+data:
+  primary_dataset: "MovieLens 100K"
+  metadata: "TMDB metadata (for week5 features and advanced diversity calculations)"
+  input_features:
+    - "User historical ratings (u.data)"
+    - "Movie attributes and genres (u.item)"
+    - "TMDB textual descriptions and metadata"
+  data_split:
+    train: "Used for model training."
+    valid: "Used strictly for Early Stopping and model selection."
+    test: "Used exclusively for final evaluation to ensure no data leakage."
+
+baseline_model:
+  algorithm: "LightGBM LambdaRank"
+  primary_features:
+    - "User History"
+    - "Co-occurrence"
+    - "Latent Preference (Matrix Factorization signals)"
+  primary_objective: "Maximize relevance and ranking quality (Recall, NDCG)."
+  main_script: "movie_lgb_recommender.py"
+
+extension_modules:
+  week3:
+    name: "Multi-objective Feature Engineering"
+    script: "week3_features.py"
+    description: "Introduces novelty penalties and diversity features based on multi-hot genre vectors to prepare for multi-objective optimization."
+  week4:
+    name: "Re-ranking Strategies"
+    script: "week4_reranking.py"
+    description: "Implements Pareto Dominance and Maximal Marginal Relevance (MMR) strategies to balance accuracy with recommendation diversity."
+  week5:
+    name: "Natural Language Query-to-Objective Mapping"
+    script: "week5_nlp_pareto.py"
+    description: "Rule-based natural language mapping to adjust objective preferences dynamically (e.g., triggering Pareto/MMR weights based on semantic queries)."
+    status: "experimental / dynamic preference control"
+  week6:
+    name: "System-level Evaluation"
+    script: "week6_evaluation.py"
+    description: "Provides batch evaluation, method comparisons, and trade-off analysis visualizations (e.g., Alpha sweep curves)."
+
+objectives:
+  setting: "Multi-objective setting, aiming to balance multiple conflicting goals rather than single-objective optimization."
+  metrics:
+    relevance: "Accuracy of the recommendation (predicted score vs true rating)."
+    novelty: "Pushing less popular but relevant items to avoid popularity bias."
+    diversity: "[Optional] Ensuring variety in genres/attributes within the top-K list."
+    user_controllable_preference: "[Optional] Adjusting the importance of relevance, novelty, and diversity based on natural language input (week5)."
+
+evaluation:
+  protocol: "Test set is strictly separated from the training process and never used for early stopping."
+  core_metrics:
+    - "Recall@10"
+    - "NDCG@10"
+  secondary_metrics:
+    - "Novelty@10"
+    - "ILD@10 (Intra-List Diversity)"
+  analysis:
+    - "Trade-off curves (e.g., NDCG vs. Novelty)"
+    - "Alpha sweep for MMR parameter tuning"
+    - "Method comparison visualizations"
+
+constraints:
+  - "no data leakage: strict train/valid/test boundaries."
+  - "reproducibility: fixed random seeds and isolated virtual environment."
+  - "modular pipeline: clear separation between baseline training and re-ranking extensions."
+  - "separation of concerns: baseline handles relevance, extensions handle multi-objective logic."
+  - "demo independence: Streamlit app serves purely for visualization and does not compromise offline evaluation correctness."
+
+outputs:
+  - "ranked movie list (baseline)"
+  - "re-ranked recommendation list (Pareto/MMR)"
+  - "evaluation metrics (Recall, NDCG, Novelty, Diversity)"
+  - "analysis plots (trade-off curves, alpha sweep, method comparison)"
+  - "Streamlit demo interface"
+
+file_mapping:
+  "baseline pipeline": "movie_lgb_recommender.py"
+  "latent features": "mf_features.py"
+  "feature engineering extension": "week3_features.py"
+  "reranking": "week4_reranking.py"
+  "NLP objective control": "week5_nlp_pareto.py"
+  "evaluation": "week6_evaluation.py"
+  "frontend demo": 
+    - "app.py"
+    - "demo_app.py"
