@@ -1,33 +1,52 @@
 # Movie Recommendation System 🎬
 
-這是一個基於 **LightGBM (LambdaRank)** 所建構的電影推薦系統，屬於大三專題專案的一部分。系統採用 [MovieLens 100K Dataset](https://grouplens.org/datasets/movielens/100k/) 作為訓練與測試資料集。
-
-## 網站展示 (Streamlit Frontend)
-
-為了將訓練出的離線預測結果具象化，我們實作了一個互動式的 Web App 前端：
-- **快速切換**：可從側邊欄自由選擇 Test Set 中的 User ID。
-- **極速預測**：採用批次 (Batch Evaluation) 結合記憶體快取 (`@st.cache_data`)，百萬條電影候選清單可在幾秒內全數預測完畢，切換使用者延遲為 0 毫秒！
-- **推薦命中指示**：系統精選前 10 名推薦電影。如果該部電影剛好出現在該用戶的「測試期間真實好評名單」中，則會標亮為 `⭐ 命中!`。
+本專案實作一個基於 **LightGBM (LambdaRank)** 為核心的混合式推薦系統（Hybrid Recommendation System），屬於大三專題之研究型專案。本系統利用 [MovieLens 100K Dataset](https://grouplens.org/datasets/movielens/100k/) 與 TMDB 資料集，探討從初始的 Learning-to-Rank 模型到結合多目標最佳化（Multi-Objective Optimization）與自然語言映射（Natural-Language Condition Mapping）的方法演進。
 
 ## 系統核心架構
 
-本專案將機器學習與 UI 流暢結合在一起。主要包含兩支程式檔案：
+本專案旨在將機器學習模型的實驗評估與前端展示作深度整合。系統設計包含資料前處理、特徵工程、多目標重新排序（Re-ranking）及系統層級的評估。
 
+主要核心檔案劃分如下：
 1. **`movie_lgb_recommender.py`**:
-   - 負責資料載入與 Train / Test 拆分。
-   - 進行特徵工程 (User Avg Rating, Movie Popularity, Genre Matches)。
-   - 訓練 LightGBM (LambdaRank) 排序模型。
-   - 內建 Week 2 評核機制 (`Recall@10` 與 `NDCG@10`)。
-2. **`app.py`**:
-   - 使用 [Streamlit](https://streamlit.io/) 建立的前端互動網頁。
-   - 負責串接 `run_recommender_pipeline()` 並利用 Dataframe 完美呈現推薦結果與評分。
+   - 負責資料載入與 **Train / Validation / Test** 切分。其中，Validation Set 專供模型的 Early Stopping 與超參數挑選（Model Selection）使用，確保 Test Set 僅用於最終無偏差的評估。
+   - 進行混合特徵工程，包含使用者的歷史偏好（User History）、共現性特徵（Co-occurrence）以及基於矩陣分解的潛在偏好訊號（MF / Latent Preference）等協同過濾訊號（Collaborative Signals）。
+   - 訓練基於 LightGBM 的 LambdaRank 排序模型。
+2. **`app.py` 與 `demo_app.py`**:
+   - 基於 [Streamlit](https://streamlit.io/) 構建的前端互動介面。
+   - 提供百萬級候選清單的批次推論（Batch Evaluation）與快取機制，達成 0 毫秒延遲的即時預測與多方法比較展示。
 
-## Offline 表現 (Baseline)
+## 方法演進 (Weekly Progress Mapping)
 
-系統的初版表現為：
-- **Mean Recall@10** : ~4.74% (以真實 Rating >= 3.0 當作相關基準)
-- **Mean NDCG@10** : ~14.10%
-*(由於特徵簡潔，這是一個理想的 Baseline)*
+為有系統地推進研究，本專案依階段迭代不同的演算法機制，對應之檔案與研究流程如下：
+
+- **Week 1–2: LightGBM Baseline (`movie_lgb_recommender.py`, `mf_features.py`)**
+  - 建構以 LightGBM ranking 為核心的混和式基準模型（Hybrid Baseline）。
+  - 將 Matrix Factorization (MF) 的 latent preference signal 以及 collaborative signals 融合至排序特徵中，大幅提升系統的 Recall 表現。
+- **Week 3: Novelty & Diversity Features (`week3_features.py`)**
+  - 實作多維度特徵：包含電影新穎度（Novelty）懲罰及基於 Multi-hot Genre 的多樣性（Diversity）計算，為後續多目標最佳化奠定基礎。
+- **Week 4: Re-ranking Strategies (`week4_reranking.py`)**
+  - 導入重新排序策略（Re-ranking）以平衡準確度與推薦多元性。
+  - 實作 Pareto Dominance（不妥協分數下的多邊界尋優）與 Maximal Marginal Relevance (MMR) 演算法（動態調配 Relevance 與 Diversity 的 $\lambda$ 參數）。
+- **Week 5: Natural-Language Condition Mapping (`week5_nlp_pareto.py`)**
+  - 定位為 Rule-based query-to-objective recommender。
+  - 將自然語言條件對應至推薦目標（Natural-Language Condition Mapping），實現基於查詢條件的偏好微調（Query-conditioned preference adjustment）。重點在於解析語意條件（如：「近期上映且多樣化的好片」）並動態觸發 Pareto/MMR 的目標權重，而非訓練大型語言模型。
+- **Week 6: System-Level Evaluation (`week6_evaluation.py`)**
+  - 建構大規模的 Batch 評測環境。繪製 NDCG vs. Novelty 及 NDCG vs. ILD 的 Trade-off 曲線，量化並比較各階段演算法的實質效益。
+
+## 離線實驗評估 (Offline Evaluation Results)
+
+專案採用嚴謹的離線評估流程，並以 **Recall@10** 與 **NDCG@10** 作為衡量推薦準確度與排序品質之主要指標。多目標方法亦額外評估 Novelty@10 與 ILD@10（清單內成對多樣性）。
+
+以下為 Test Set 上的實驗數據總覽：
+
+| Model / Method | Recall@10 | NDCG@10 | Novelty@10 | ILD@10 | 說明 |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **Baseline (Simple Features)** | [待補最新實驗結果] | [待補最新實驗結果] | - | - | 僅使用基礎特徵之 LightGBM 排序 |
+| **Enhanced Baseline (+MF & Collaborative Signals)** | [待補最新實驗結果] | [待補最新實驗結果] | - | - | 整合 MF 潛在特徵之混合式基準模型 |
+| **MMR Re-ranking ($\lambda=0.5$)** | [待補最新實驗結果] | [待補最新實驗結果] | [待補最新實驗結果] | [待補最新實驗結果] | 妥協部分準確度以換取最佳化多樣性 |
+| **Dynamic Pareto Re-ranking** | [待補最新實驗結果] | [待補最新實驗結果] | [待補最新實驗結果] | [待補最新實驗結果] | 針對多目標特徵進行無支配排序 |
+
+*(註：實驗基準以真實評分 Rating $\ge 3.0$ 作為相關性判斷閥值)*
 
 ## 專案結構 (Project Structure)
 
@@ -36,148 +55,68 @@
 │── app.py                    # 完整前端互動介面入口
 │── demo_app.py               # 精簡展示版前端入口
 │── requirements.txt          # 環境依賴套件清單
-│── movie_lgb_recommender.py  # 核心資料載入、特徵工程與 LightGBM 訓練
-│── week3_features.py         # 多目標特徵工程 (新穎度、多樣性)
-│── week4_reranking.py        # 重新排序策略 (Pareto, MMR)
-│── week5_nlp_pareto.py       # TMDB 資料串接、自然語言解析與動態 Pareto
-│── week6_evaluation.py       # 系統層級評估與圖表繪製
-│── mf_features.py            # 純 Numpy 實作的 Matrix Factorization 模組
-└── README.md                 # 專案說明文件
+│── movie_lgb_recommender.py  # 核心資料處理、特徵工程與 LightGBM LambdaRank 訓練
+│── mf_features.py            # 純 Numpy 實作的 Latent Preference (Matrix Factorization)
+│── week3_features.py         # 多目標特徵計算 (Novelty, Diversity)
+│── week4_reranking.py        # 重新排序策略實作 (MMR, Pareto)
+│── week5_nlp_pareto.py       # Rule-based NLP 動態權重映射
+│── week6_evaluation.py       # 系統層級綜合評估與 Trade-off 視覺化
+└── README.md                 # 專題文件 (本檔案)
 ```
 
 ## 資料集準備 (Dataset Setup)
 
-本專案依賴兩個開源資料集。為確保程式能正確讀取資料，請依照以下說明下載並放置檔案：
+本專案依賴兩個開源資料集。為確保模型成功訓練與特徵擴充正確，請依照以下結構放置檔案：
 
-### 1. MovieLens 100K
+### 1. MovieLens 100K Dataset
 * **來源**：[GroupLens 官方下載點](https://grouplens.org/datasets/movielens/100k/) (下載 `ml-100k.zip` 並解壓縮)
-* **必需檔案**：`u.data` (使用者評分) 與 `u.item` (電影資訊)
-* **預期路徑**：建議在專案根目錄建立 `MovieLens 100K` 資料夾，並將檔案放入其內。
-* **結構範例**：
+* **必需檔案**：`u.data` (使用者歷史評分) 與 `u.item` (電影屬性資訊)
+* **預期路徑**：請在專案根目錄建立 `MovieLens 100K` 資料夾並放置檔案。
   ```text
   大三專題/
   └── MovieLens 100K/
       ├── u.data
       └── u.item
   ```
-*(程式兼容於根目錄下作為替代位置)*
 
-### 2. TMDB 5000 Movies Metadata (Week 5 之後需要)
+### 2. TMDB 5000 Movies Metadata (進階多目標特徵需要)
 * **來源**：[Kaggle TMDB 5000 Movie Dataset](https://www.kaggle.com/datasets/tmdb/tmdb-movie-metadata)
 * **必需檔案**：`tmdb_5000_movies.csv`
-* **預期路徑**：請在專案根目錄建立 `TMDB metadata` 資料夾，並將 CSV 檔案放入其內。
-* **結構範例**：
+* **預期路徑**：請在專案根目錄建立 `TMDB metadata` 資料夾並放置。
   ```text
   大三專題/
   └── TMDB metadata/
-      └── tmdb_5000_movies.csv
+      └── TMDB_5000_movies.csv
   ```
 
-## 環境設定與安裝 (Setup & Installation)
+## 環境設定與啟動 (Setup & Installation)
 
-本專案建議使用 **Python 3.10+** 並透過 `venv` 建立獨立虛擬環境來執行。
+本專案建議使用 **Python 3.10+** 並透過 `venv` 建立獨立虛擬環境來執行，以確保實驗環境之可重現性 (Reproducibility)。
 
 ```bash
 # 1. 進入專案資料夾
 cd 大三專題
 
-# 2. 建立並啟動虛擬環境
+# 2. 建立虛擬環境
 python -m venv venv
 
-# macOS / Linux 系統請執行：
+# 3. 啟動虛擬環境
+# macOS / Linux:
 source venv/bin/activate
-# Windows 系統請執行：
+# Windows:
 # venv\Scripts\activate
 
-# 3. 安裝所有依賴套件
+# 4. 安裝依賴套件
 pip install -r requirements.txt
 
-# 4. 啟動 Streamlit 應用程式
+# 5. 啟動展示應用程式
+# 完整功能版（含所有頁籤）
 python -m streamlit run app.py
-```
-> 註：執行前請確保此資料夾下有 `MovieLens 100K` 資料集 (包含 `u.data` 及 `u.item`)，以及相關 TMDB 資料集。
-
-## 最新進度：Week 3 & Week 4 演算法升級
-
-除了基本的 LightGBM 模型外，系統現已整合多目標策略，以提升推薦滿意度：
-
-- **👉 Week 3: 多目標特徵工程 (Multi-objective Feature Engineering)**
-  - 實作了 **Novelty (新穎度)** 計算：`Novelty(i) = -log(popularity(i) / max_popularity)`
-  - 實作了 **Diversity (多樣性)** 相似度基礎：基於 Genre 的 Multi-hot 內積算法計算。
-  - 獨立腳本：`week3_features.py`，支援繪製電影分布。
-
-- **👉 Week 4: 雙重重新排序策略 (Re-ranking)**
-  - **Pareto Dominance**：尋找「不可支配」的電影集合 (Pareto Frontier) 進行重排，在不妥協分數的情況下保證最佳新穎度。
-  - **Maximal Marginal Relevance (MMR)**：實作 Greedy 貪婪演算法，透過動態切換 $\lambda$ (0.0 ~ 1.0) 自由調配 Relevance 與 Diversity 的拉扯權衡。
-  - 獨立腳本：`week4_reranking.py`。
-  
-- **👉 Week 5: TMDB 資料串接與 NLP 動態多目標推薦**
-  - **資料擴充**：將 MovieLens 與 TMDB (tmdb_5000_movies) 資料庫進行清洗配對，萃取 `popularity`, `vote_average` 及 `release_year`，擴充為進階評估特徵 (`novelty`, `quality` & `recency`)。
-  - **自然語言解析**：實作了 Rule-based NLP 分析器，支援直覺的語意關鍵字組合（如：「推薦近期上映而且多樣化的好片」）。
-  - **動態 Pareto Re-ranking**：打破傳統單純排序，實作高階動態 Pareto 機制。當指令包含單一目標時採用高速排序；當面臨 `diversity` (多樣性) 目標時，則採用 Greedy 邊界尋優，每一輪皆會根據「當前已選片單」即時翻新候選池的 Jaccard 相似度！
-  - 獨立腳本：`week5_nlp_pareto.py`。
-  
-- **👉 Week 6: 方法比較與系統評估分析 (System-Level Evaluation)**
-  - **多維評估指標**：實作了 `NDCG@K`（排序準確度）、`Novelty@K`（新穎度平均）、`ILD@K（Intra-List Diversity）`（清單內成對相似度）、`Coverage`（涵蓋率）共四大量化指標。
-  - **大規模批次比較**：在相同候選池（前 50 名）與 Top-10 條件下，對 LightGBM Baseline、MMR（五種 λ）、Pareto 及四種 NLP 目標組合進行全面 Batch 評測。
-  - **Trade-off 視覺化**：以 Seaborn 散佈圖繪製 `NDCG vs Novelty` 及 `NDCG vs ILD (Diversity)` 對決，清楚展現不同方法在準確度與多元性之間的取捨。
-  - 評估腳本：`week6_evaluation.py`。
-
-- **👉 Week 7: 特徵工程進階與 Matrix Factorization**
-  - **Feature Importance & Sweep**：整合 LightGBM 內建的特徵重要性 (Split) 與自訂的 Permutation Importance 來檢驗每個特徵的實質影響力（如：NDCG Drop）；並實作了全自動化的參數掃描 (Parameter Sweeps) 來尋找最佳的流行度懲罰權重 (`alpha`)。
-  - **Pure Numpy Matrix Factorization**：為了避免在不同作業系統間編譯 C++ （如 Surprise 套件）造成的環境錯誤，團隊手刻了一套純依賴 Numpy 且訓練極快（只需數秒）的 SGD Latent Preference 模型 (`mf_features.py`)，將提取出的 MF 分配權重 (`mf_weight`)，再送到下游的 LightGBM 進行進階排序，有效提升 Recall。
-
-這五個階段的成果完整地串接並整合於 Streamlit 互動介面中，隨時可以進行網頁互動展示！
-
-## 啟動方式 (How to Run)
-
-本專案提供兩個 Streamlit 入口：
-
-```bash
-# 完整功能版（含 Week 3~6 所有頁籤）
-python -m streamlit run app.py
-
-# 精簡展示版（專題 Demo 用）
+# 專題 Demo 展示特化版
 python -m streamlit run demo_app.py
 ```
-
-> 若同時啟動兩個版本，請指定不同 Port：
-> ```bash
-> python -m streamlit run demo_app.py --server.port 8502
-> ```
-
-## Demo 操作說明
-
-`demo_app.py` 是一個專為專題展示設計的輕量級互動面板：
-
-1. 在側邊欄輸入 **User ID**（Test Set 範圍內）
-2. 從下拉選單選擇 **推薦方法**（Baseline / MMR / Pareto / Pareto+NLP）
-3. 若選擇 MMR，可用 Slider 即時調整 **λ 值**
-4. 若選擇 Pareto + NLP，可輸入 **自然語言 Prompt**（例如：推薦冷門且多樣的電影）
-5. 點擊「🚀 產生推薦」查看推薦結果
-6. 畫面同時呈現 **Baseline 對照** 與 **所選方法的 Top-K 結果**
-
-## Offline 表現 (Baseline)
-
-系統的初版表現為：
-- **Mean Recall@10** : ~4.74% (以真實 Rating >= 3.0 當作相關基準)
-- **Mean NDCG@10** : ~14.10%
-*(由於特徵簡潔，這是一個理想的 Baseline)*
+> 若啟動前端時發生資料存取錯誤，請先確保已按上述步驟下載並配置好對應之資料集。
 
 ## 未來展望
-- 嘗試將現行 LambdaRank 架構神經網路化 (Deep Learning Ranking Models)。
-- 支援真實使用者歷史即時操作的回饋迴圈 (Online Learning)。
-
-## 可重現性聲明 (Reproducibility)
-
-本專案致力於維持公開運行的可重現性：
-1. 專案的執行依賴已統一列於 `requirements.txt` 中。
-2. 開發與驗證均建議於隔離的虛擬環境 (venv) 下進行。
-3. 本專案已於開發環境進行基本功能測試；為確保推薦系統模型能正確運行，使用者需嚴格依照上方【資料集準備】的說明配置相關資料檔案。
-
-### 建議驗證步驟
-
-為確認您的環境是否建置完備，建議新使用者可透過以下流程自行驗證：
-1. **建立乾淨環境**：開啓終端機並建立全新的虛擬環境 (`python -m venv venv`)。
-2. **安裝相依套件**：啟動環境後執行 `pip install -r requirements.txt`。
-3. **啟動前端應用**：執行 `python -m streamlit run app.py`；若順利進入網頁且無出現模組遺漏錯誤或資料路徑報錯，即視為驗證成功。
+- **Deep Learning Ranking Models**：嘗試將現行 LambdaRank 樹狀架構替換或增強為神經網路排序架構。
+- **Online Learning & Feedback Loop**：整合即時互動回饋機制，模擬生產環境中動態調整模型權重的特性。
