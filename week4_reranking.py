@@ -3,131 +3,137 @@ import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 
 
-def pareto_rerank(user_candidates, k=10, pool_size=50, tie_break='relevance'):
+def pareto_rerank(user_candidates, k=10, pool_size=100, tie_break='weighted',
+                  relevance_weight=0.85, novelty_weight=0.15, epsilon=0.01,
+                  selection_mode='soft'):
     """
-    Pareto Dominance Re-ranking（雙階段設計）
+    Improved Pareto Dominance Re-ranking（雙階段設計 + Epsilon 支配 + Soft 模式）
 
     ════════════════════════════════════════════════════════════
-    【第一階段】Pareto Filtering（Pareto 的角色：篩選）
+    【第一階段】Pareto Selection（篩選與分層）
     ────────────────────────────────────────────────────────────
-      - 採用 Pareto Dominance 方法，從 candidate pool 中逐層篩選
-      - 找出 Non-dominated 集合（Layer 1, Layer 2 ... 直到收集夠 k 個項目）
-      - Item A dominates B 的條件：
-          * predict_score(A) >= predict_score(B)
-          * novelty_norm(A)  >= novelty_norm(B)
-          * 且至少有一項嚴格大於（>）
-      - Pareto 只決定「哪些 item 被選中」，不決定最終排序！
-
-    【第二階段】Tie-break Sorting（Tie-break 的角色：排序）
+      - 支援 Epsilon Dominance：只有當優勢顯著超過 epsilon 時才構成嚴格支配，
+        這能避免因極小分差（如 0.0001）而踢掉高相關性項目的問題，有助於穩住 NDCG。
+      - 模式選擇 (selection_mode)：
+          * 'hard'：傳統 Pareto 分層，依序取 Layer 1, Layer 2 ... 直到滿足 k 個。
+          * 'soft'：不強行按層切斷，而是結合 (1/layer) 與加權分數進行全局排序。
+    
+    【第二階段】Tie-break Sorting（全局重排序）
     ────────────────────────────────────────────────────────────
-      - 在 Pareto front 收集完畢後，對已選集合進行全局重排序
-      - 解決 Pareto 本身不定義最終排序的問題，提升 NDCG 表現
-      - 支援兩種策略（透過 tie_break 參數選擇）：
-          * 'relevance'：以 predict_score 由高到低排序（預設）
-          * 'weighted' ：加權排序，
-                         final_score = 0.7 * predict_score_norm
-                                     + 0.3 * novelty_norm
-                         兼顧相關性（relevance）與新穎度（novelty）
+      - 在選出的候選集內進行最終排序，確保 Top-1 是當前策略下的最佳選擇。
+      - 支援自定義權重 (relevance_weight, novelty_weight)。
+      - 預設權重 0.85 / 0.15 為保守策略，平衡 NDCG 與 Novelty。
     ════════════════════════════════════════════════════════════
 
     Parameters
     ----------
     user_candidates : pd.DataFrame
-        候選電影 DataFrame，需包含 predict_score 欄位。
+        候選電影 DataFrame。
     k : int
-        最終推薦數量（Top-K）。
+        最終推薦數量。
     pool_size : int
-        Pareto 篩選的候選池大小（從 predict_score 排名前 pool_size 中挑選）。
+        候選池大小。
     tie_break : str
-        Tie-break 排序策略。
-        - 'relevance'（預設）：使用 predict_score 由高到低排序
-        - 'weighted'          ：使用加權分數進行排序
-
-    Returns
-    -------
-    pd.DataFrame
-        經 Pareto 篩選與 Tie-break 排序後的 Top-K 推薦結果，
-        含 pareto_rank 欄位。
+        'relevance' 或 'weighted'。
+    relevance_weight : float
+        相關性權重，預設 0.85。
+    novelty_weight : float
+        新穎度權重，預設 0.15。
+    epsilon : float
+        支配邊際 (dominance margin)，預設 0.01。
+    selection_mode : str
+        'hard' (嚴格分層) 或 'soft' (加權融合層級分數)。
     """
-    df = user_candidates.sort_values('predict_score', ascending=False).head(pool_size).copy().reset_index(drop=True)
+    # 1. 準備資料與安全處理
+    actual_pool_size = min(len(user_candidates), pool_size)
+    df = user_candidates.sort_values('predict_score', ascending=False).head(actual_pool_size).copy().reset_index(drop=True)
 
-    # 確保 novelty_norm 存在（相容 Week 5 TMDB 整合版）
+    if df.empty:
+        return df
+
+    # 確保 novelty_norm 存在
     if 'novelty_norm' not in df.columns:
         if 'novelty' in df.columns:
             df['novelty_norm'] = df['novelty']
         else:
             df['novelty_norm'] = 0.5
 
-    # ──────────────────────────────────────────────
-    # 【第一階段】Pareto Filtering
-    # 逐層找出 Non-dominated 集合，累積至 k 個候選
-    # ──────────────────────────────────────────────
-    selected_indices = []
+    # 2. Min-Max Normalization (確保 epsilon 與加權在同一量級)
+    scaler = MinMaxScaler()
+    df['_norm_score'] = scaler.fit_transform(df[['predict_score']])
+    # novelty_norm 通常已在 0~1，此處亦可再次確認或直接使用
+    df['_norm_novelty'] = df['novelty_norm']
+
+    # 3. 計算 Pareto Layers (全池計算，為 soft 模式打底)
     remaining_indices = list(df.index)
-    layer = 1
-
-    while len(selected_indices) < k and remaining_indices:
-        current_frontier = set()
-
-        # 尋找目前的 non-dominated 集合（當前 layer 的 Pareto front）
+    df['pareto_layer'] = 0
+    current_layer = 1
+    
+    while remaining_indices:
+        layer_indices = []
         for i in remaining_indices:
-            dominated = False
-            p_i = df.loc[i, 'predict_score']
-            n_i = df.loc[i, 'novelty_norm']
-
+            is_dominated = False
+            s_i = df.loc[i, '_norm_score']
+            n_i = df.loc[i, '_norm_novelty']
+            
             for j in remaining_indices:
-                if i == j:
-                    continue
-                p_j = df.loc[j, 'predict_score']
-                n_j = df.loc[j, 'novelty_norm']
-
-                # 判斷 i 是否被 j 支配（dominated）
-                if (p_j >= p_i and n_j >= n_i) and (p_j > p_i or n_j > n_i):
-                    dominated = True
+                if i == j: continue
+                s_j = df.loc[j, '_norm_score']
+                n_j = df.loc[j, '_norm_novelty']
+                
+                # Dominance with Epsilon Margin:
+                # j 支配 i 的條件：j 在各項都不輸 i (允許可控誤差)，且至少有一項顯著勝過 i
+                if (s_j >= s_i - epsilon and n_j >= n_i - epsilon) and \
+                   (s_j > s_i + epsilon or n_j > n_i + epsilon):
+                    is_dominated = True
                     break
-
-            if not dominated:
-                current_frontier.add(i)
-
-        # 將此 layer 的所有 item 加入已選集合（layer 內以 predict_score 做初步排序）
-        frontier_df = df.loc[list(current_frontier)].sort_values('predict_score', ascending=False)
-        items_to_add = list(frontier_df.index)
-        selected_indices.extend(items_to_add)
-
-        # 從候選池移除已選項目，準備下一個 layer
-        for idx in items_to_add:
+            
+            if not is_dominated:
+                layer_indices.append(i)
+        
+        df.loc[layer_indices, 'pareto_layer'] = current_layer
+        for idx in layer_indices:
             remaining_indices.remove(idx)
+        current_layer += 1
 
-        layer += 1
+    # 4. 執行篩選邏輯
+    if selection_mode == 'soft':
+        # Soft Pareto: 結合層級權益與加權指標分數
+        # layer 1 獲得 1.0, layer 2 獲得 0.5 ... 以此類推，再疊加權重分數
+        df['_final_selection_score'] = (1.0 / df['pareto_layer']) + \
+                                      (relevance_weight * df['_norm_score'] + 
+                                       novelty_weight * df['_norm_novelty'])
+        final_df = df.sort_values('_final_selection_score', ascending=False).head(k).copy()
+    else:
+        # Hard Pareto: 傳統分層抓取，直到滿足 k 個
+        selected_indices = []
+        l = 1
+        while len(selected_indices) < k and l < current_layer:
+            layer_items = df[df['pareto_layer'] == l].index.tolist()
+            selected_indices.extend(layer_items)
+            l += 1
+        candidate_indices = selected_indices[:k]
+        final_df = df.loc[candidate_indices].copy()
 
-    # 取出前 k 個（跨多層 Pareto 篩選後的候選集合）
-    candidate_indices = selected_indices[:k]
-    final_df = df.loc[candidate_indices].copy()
-
-    # ──────────────────────────────────────────────
-    # 【第二階段】Tie-break Sorting（新增）
-    # 對 Pareto front 進行全局重排序，提升 NDCG
-    # ──────────────────────────────────────────────
+    # 5. 第二階段：Tie-break Sorting (對已挑出的候選集進行最終排序)
     if tie_break == 'weighted':
-        # 加權策略：normalize predict_score 後加權合併 novelty_norm
-        scaler = MinMaxScaler()
-        final_df = final_df.copy()
-        final_df['_predict_score_norm'] = scaler.fit_transform(final_df[['predict_score']])
         final_df['_tiebreak_score'] = (
-            0.7 * final_df['_predict_score_norm'] +
-            0.3 * final_df['novelty_norm']
+            relevance_weight * final_df['_norm_score'] + 
+            novelty_weight * final_df['_norm_novelty']
         )
         final_df = final_df.sort_values('_tiebreak_score', ascending=False)
-        # 移除暫時欄位
-        final_df.drop(columns=['_predict_score_norm', '_tiebreak_score'], inplace=True)
     else:
-        # 預設：relevance 策略，直接以 predict_score 由高到低排序
+        # 預設 'relevance': 即使經過 Pareto，最終仍以預測分數為準
         final_df = final_df.sort_values('predict_score', ascending=False)
 
-    # 重新指派最終推薦排名
+    # 6. 整理輸出
     final_df = final_df.reset_index(drop=True)
     final_df['pareto_rank'] = range(1, len(final_df) + 1)
-
+    
+    # 移除內部運算暫存欄位
+    tmp_cols = ['_norm_score', '_norm_novelty', '_final_selection_score', '_tiebreak_score']
+    final_df.drop(columns=[c for c in tmp_cols if c in final_df.columns], inplace=True)
+    
     return final_df
 
 

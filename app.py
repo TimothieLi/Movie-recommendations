@@ -161,7 +161,9 @@ elif page_selection == "🏆 Re-ranking 演算法 (Week 4)":
         
     with col_pareto:
         st.subheader("2️⃣ Pareto Re-ranking Top-10")
-        pareto_df = pareto_rerank(user_candidates, k=10)
+        pareto_df = pareto_rerank(user_candidates, k=10,
+                                   pool_size=100, tie_break='weighted',
+                                   selection_mode='soft')
         pareto_display = pareto_df[['movie_title', 'predict_score', 'novelty_norm']].copy()
         pareto_display.index = range(1, len(pareto_display) + 1)
         st.dataframe(pareto_display, use_container_width=True)
@@ -366,7 +368,7 @@ elif page_selection == "📈 方法比較與分析 (Week 6)":
         # 綁定參數
         lgbm_fn = lambda c: c.sort_values('predict_score', ascending=False)
         mmr_fn = lambda c: mmr_rerank(c, genre_cols, lambda_val=0.0, k=10)
-        par_fn = lambda c: pareto_rerank(c, k=10)
+        par_fn = lambda c: pareto_rerank(c, k=10, pool_size=100, tie_break='weighted', selection_mode='soft')
         nlp_fn = lambda c: dynamic_pareto_rerank(c, genre_cols, parse_query("冷門 多樣"), k=10)
         
         s_data = [

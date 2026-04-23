@@ -82,7 +82,7 @@ def run_week6_experiments(test_users, unseen_candidates, test_ground_truth, genr
         {"name": "MMR", "params": "λ=0.5", "type": "mmr", "lambda_val": 0.5},
         {"name": "MMR", "params": "λ=0.75", "type": "mmr", "lambda_val": 0.75},
         {"name": "MMR", "params": "λ=1.0", "type": "mmr", "lambda_val": 1.0},
-        {"name": "Pareto Re-ranking", "params": "N/A", "type": "pareto_w4"},
+        {"name": "Pareto Re-ranking (Soft)", "params": "soft+weighted", "type": "pareto_w4"},
         {"name": "Pareto + NLP", "params": "Query: 冷門", "type": "nlp", "query": "冷門"},
         {"name": "Pareto + NLP", "params": "Query: 多樣", "type": "nlp", "query": "多樣"},
         {"name": "Pareto + NLP", "params": "Query: 新", "type": "nlp", "query": "新"},
@@ -120,7 +120,7 @@ def run_week6_experiments(test_users, unseen_candidates, test_ground_truth, genr
             elif config["type"] == "mmr":
                 fn = lambda c: mmr_rerank(c, genre_cols, config["lambda_val"], k=k, pool_size=pool_size)
             elif config["type"] == "pareto_w4":
-                fn = lambda c: pareto_rerank(c, k=k, pool_size=pool_size)
+                fn = lambda c: pareto_rerank(c, k=k, pool_size=100, tie_break='weighted', selection_mode='soft')
             elif config["type"] == "nlp":
                 fn = lambda c: dynamic_pareto_rerank(c, genre_cols, config["objectives"], k=k, pool_size=pool_size)
                 
