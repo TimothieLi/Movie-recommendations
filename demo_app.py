@@ -8,6 +8,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import warnings
+from tmdb_api import TMDBClient
+from week6_evaluation import calculate_ild_at_k, calculate_novelty_at_k
+from movie_lgb_recommender import ndcg_at_k, recall_at_k
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────
@@ -42,12 +45,10 @@ with st.sidebar:
     st.markdown("---")
 
     # User ID
-    user_id = st.number_input(
-        "👤 User ID",
-        min_value=int(min(test_users)),
-        max_value=int(max(test_users)),
-        value=int(test_users[0]),
-        step=1,
+    user_id = st.selectbox(
+        "👤 選擇 User ID",
+        options=test_users,
+        index=0,
     )
     if user_id not in test_users:
         st.warning("此 ID 不在 Test Set 中，請重新輸入。")
@@ -80,6 +81,13 @@ with st.sidebar:
         st.caption("支援關鍵字：冷門、多樣、新、評價")
 
     st.markdown("---")
+    
+    st.header("🌐 外部資料整合")
+    tmdb_api_key = st.text_input("TMDB API Key", type="password", help="輸入 API Key 啟用 TMDB 推薦")
+    if tmdb_api_key:
+        st.success("✅ TMDB 整合已開啟")
+
+    st.markdown("---")
 
     # Top-K
     top_k = st.selectbox("📌 推薦數量 (Top-K)", [10, 15, 20], index=0)
@@ -100,6 +108,15 @@ GENRE_COLS = [
 def get_candidates(user_id):
     """取得該 User 的候選清單，並補上 novelty_norm fallback"""
     df = unseen_candidates[unseen_candidates['user_id'] == user_id].copy()
+    df['source'] = 'movielens'
+    
+    if tmdb_api_key:
+        with st.spinner("🌐 正在獲取 TMDB 新電影..."):
+            client = TMDBClient(tmdb_api_key)
+            tmdb_df = client.get_candidates(user_id, count=50, genre_cols=GENRE_COLS)
+            if not tmdb_df.empty:
+                df = pd.concat([df, tmdb_df], ignore_index=True)
+                
     if 'novelty_norm' not in df.columns:
         df['novelty_norm'] = df['novelty'] if 'novelty' in df.columns else 0.5
     return df
@@ -123,10 +140,18 @@ def recommend_nlp_pareto(candidates, k, prompt):
 # ─────────────────────────────────────────────
 # 4. 顯示輔助函式
 # ─────────────────────────────────────────────
-def format_display(df, method_name):
+def format_display(df, method_name, liked_ids=None):
     """
     整齊地挑選欄位並重命名，避免出現空白或不存在的欄位。
+    若提供了 liked_ids，則會在匹配的電影名稱前加上 ⭐。
     """
+    df = df.copy()
+    if liked_ids and 'movie_id' in df.columns:
+        df['movie_title'] = df.apply(
+            lambda x: f"⭐ {x['movie_title']}" if x['movie_id'] in liked_ids else x['movie_title'],
+            axis=1
+        )
+    
     # 基本欄位
     base_cols = {
         'movie_title': 'Movie Title',
@@ -134,6 +159,7 @@ def format_display(df, method_name):
     }
     # 如果有 TMDB 特徵就加入
     optional_cols = {
+        'source': 'Source',
         'novelty': 'Novelty',
         'recency': 'Recency',
         'quality': 'Quality',
@@ -144,11 +170,16 @@ def format_display(df, method_name):
         method_cols = {'pareto_rank': 'Pareto Rank', 'diversity': 'Diversity'}
     elif method_name == "MMR":
         method_cols = {'mmr_score': 'MMR Score', 'similarity_penalty': 'Sim Penalty'}
+        # 額外顯示 lambda 以便觀察
+        df['lambda'] = lambda_val
+        method_cols['lambda'] = 'Lambda (λ)'
 
     all_wanted = {**base_cols, **optional_cols, **method_cols}
     existing = {k: v for k, v in all_wanted.items() if k in df.columns}
 
     display = df[list(existing.keys())].copy().rename(columns=existing)
+    if 'Source' in display.columns:
+        display['Source'] = display['Source'].apply(lambda x: "🟣 TMDB" if x == 'tmdb' else "🔵 Local")
     display.index = range(1, len(display) + 1)
     display.index.name = "Rank"
     return display.round(4)
@@ -190,47 +221,104 @@ with st.spinner(f"⚙️ 執行 {method} 推薦中…"):
     elif method == "Pareto + NLP":
         result_df, objectives = recommend_nlp_pareto(candidates, top_k, nlp_prompt)
 
-# 也同時跑一份 Baseline 對照
-baseline_df = recommend_baseline(candidates, top_k)
-
 # ─────────────────────────────────────────────
-# 7. 呈現推薦結果
+# 7. 呈現推薦結果 (單一方法模式)
 # ─────────────────────────────────────────────
 
-# 若 NLP 有捕捉到意圖就顯示
-if objectives:
-    st.success(f"🎯 NLP 解析結果：目標維度 → **{', '.join(objectives)}**")
-elif method == "Pareto + NLP" and not objectives:
-    st.warning("⚠️ 未能解析出明確目標關鍵字，改用純 LightGBM 偏好分數排序。")
-
-# 並排顯示：對照用的 Baseline + 選定方法結果
-col_baseline, col_method = st.columns(2)
-
-with col_baseline:
-    st.subheader("📋 Baseline (LightGBM)")
-    st.dataframe(format_display(baseline_df, "Baseline"), use_container_width=True)
-
-with col_method:
-    icon_map = {"Baseline": "📋", "MMR": "🔀", "Pareto": "⚖️", "Pareto + NLP": "✨"}
-    st.subheader(f"{icon_map.get(method, '🎬')} {method}" + (f"  (λ={lambda_val})" if method == "MMR" else ""))
-    st.dataframe(format_display(result_df, method), use_container_width=True)
-
-st.markdown("---")
-
-# ─────────────────────────────────────────────
-# 8. Ground Truth 展示（該 User 真實喜歡的電影）
-# ─────────────────────────────────────────────
-st.subheader("✅ 該使用者的真實喜歡清單（Test Set Ground Truth）")
+# --- 取得 Ground Truth 用於星星標記 ---
 actual = test_ground_truth.get(user_id, {})
 liked_ids = [mid for mid, r in actual.items() if r >= 3.0]
 
+# (1) 主推薦結果表格
+method_icons = {"Baseline": "📋", "MMR": "🔀", "Pareto": "⚖️", "Pareto + NLP": "✨"}
+method_captions = {
+    "Baseline": "僅考慮個人偏好預測分數（LightGBM LambdaRank），不進行額外重排序。",
+    "MMR": "最大邊際相關性（Maximal Marginal Relevance），平衡「相關性」與「多樣性」，避免推薦內容過於雷同。",
+    "Pareto": "多目標 Pareto 重排序，同時優化相關性與新穎度（Novelty），尋找兩者的最佳均衡點。",
+    "Pareto + NLP": "結合 LLM 語意解析與 Pareto 演算法，將您的自然語言需求動態轉化為推薦目標權重。"
+}
+
+st.subheader(f"{method_icons.get(method, '🎬')} 1. {method} 推薦結果" + (f" (λ={lambda_val})" if method == "MMR" else ""))
+st.caption(f"{method_captions.get(method, '')} (⭐ 代表命中使用者真實喜歡的電影)")
+
+# 顯示主要結果表格
+st.dataframe(format_display(result_df, method, liked_ids=liked_ids), use_container_width=True)
+
+st.markdown("---")
+
+# (2) 推薦詳情 (Featured Movies)
+st.subheader(f"🌟 2. 精選推薦詳情 (Featured Details)")
+if method == "Pareto + NLP":
+    if objectives:
+        st.success(f"🎯 NLP 解析意圖：目標維度 → **{', '.join(objectives)}**")
+    else:
+        st.warning("⚠️ 未能解析出明確目標，已退回個人偏好排序。")
+
+# 只取前 5 部展示詳細資訊
+featured_df = result_df.head(5).copy()
+for idx, row in featured_df.iterrows():
+    with st.container():
+        col1, col2 = st.columns([1, 4])
+        poster_url = row.get('poster_path')
+        if not poster_url or pd.isna(poster_url):
+            poster_url = "https://via.placeholder.com/150x225?text=No+Poster"
+        with col1:
+            st.image(poster_url, use_container_width=True)
+        with col2:
+            st.markdown(f"### {idx+1}. {row['movie_title']}")
+            source_tag = "🟣 TMDB" if row.get('source') == 'tmdb' else "🔵 Local"
+            year = row.get('release_year', 'Unknown')
+            st.markdown(f"**來源**: {source_tag} | **年份**: {year}")
+            active_genres = [g for g in GENRE_COLS if row.get(g) == 1]
+            if active_genres:
+                st.markdown(f"**類型**: {' · '.join(active_genres)}")
+            overview = row.get('overview', "尚無電影簡介資訊。")
+            if pd.isna(overview) or not overview:
+                overview = "尚無電影簡介資訊。"
+            st.write(overview)
+            score_cols = st.columns(3)
+            score_cols[0].caption(f"⭐ 預測分數: {row.get('predict_score', 0):.2f}")
+            score_cols[1].caption(f"🔍 新穎度: {row.get('novelty', 0):.2f}")
+            score_cols[2].caption(f"📅 新舊度: {row.get('recency', 0):.2f}")
+        st.markdown("---")
+
+# (3) 效能評估指標
+st.subheader("📈 3. 效能評估指標")
+preds = result_df['movie_id'].tolist()
+m_ndcg = ndcg_at_k(actual, preds, k=top_k)
+m_recall = recall_at_k(actual, preds, k=top_k, threshold=3.0)
+m_novelty = calculate_novelty_at_k(result_df)
+m_ild = calculate_ild_at_k(result_df, GENRE_COLS)
+
+metrics_data = {
+    "指標項目": ["NDCG@K (排序品質)", "Recall@K (召回率)", "Avg Novelty (新穎度)", "ILD (多樣性)"],
+    "數值": [
+        f"{m_ndcg*100:.2f}%", 
+        f"{m_recall*100:.2f}%", 
+        f"{m_novelty*100:.2f}%", 
+        f"{m_ild*100:.2f}%"
+    ],
+    "說明": [
+        "越高代表推薦順序越符合使用者真實喜好",
+        "越高代表推薦清單中包含越多使用者喜歡的電影",
+        "越高代表推薦了越多冷門/小眾的驚喜電影",
+        "越高代表推薦清單中電影類型的差異度越大"
+    ]
+}
+st.table(pd.DataFrame(metrics_data))
+
+st.markdown("---")
+
+# (4) 該使用者真正喜歡清單 (Ground Truth)
+st.subheader("✅ 4. 該使用者的真實喜歡清單 (Test Set Ground Truth)")
+liked_ids = [mid for mid, r in actual.items() if r >= 3.0]
 if liked_ids:
     liked_movies = movies_df[movies_df['movie_id'].isin(liked_ids)][['movie_id', 'movie_title']].copy()
     liked_movies['Rating'] = liked_movies['movie_id'].map(actual)
     liked_movies = liked_movies.sort_values('Rating', ascending=False).reset_index(drop=True)
     liked_movies.index += 1
     liked_movies.index.name = "#"
-    with st.expander(f"點擊展開（共 {len(liked_movies)} 部高評價電影）"):
+    with st.expander(f"點擊展開（共 {len(liked_movies)} 部高評價電影紀錄）"):
         st.dataframe(liked_movies[['movie_title', 'Rating']], use_container_width=True)
 else:
     st.info("這名使用者在 Test Set 中沒有高於 3 分的評分紀錄。")

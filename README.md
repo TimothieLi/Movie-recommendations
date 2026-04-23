@@ -54,6 +54,10 @@
     3. **Ranking 控制層**：`dynamic_pareto_rerank()` 依解析結果動態調整 Pareto 篩選目標與 tie-break 加權比例，後端全程維持 rule-based / score-based，保持可解釋性。
 - **Week 6: System-Level Evaluation (`week6_evaluation.py`)**
   - 建構大規模的 Batch 評測環境。繪製 NDCG vs. Novelty 及 NDCG vs. ILD 的 Trade-off 曲線，量化並比較各階段演算法的實質效益。
+- **Week 7: External Data Integration (`tmdb_api.py`)**
+  - **TMDB API 整合**：導入資料庫外（Out-of-database）推薦功能。透過 TMDB Discover API 即時抓取最新、熱門或高評價電影，並與本地 MovieLens 候選集動態融合。
+  - **跨域特徵對齊**：自動將 TMDB 元數據轉化為系統可理解的 `Novelty`、`Recency` 與 `Quality` 特徵，使外部電影能無縫參與 Pareto 重排序。
+  - **展示中心升級**：`demo_app.py` 進化為「研究成果展示板」，支援單一方法深度檢視、電影海報牆（Featured Posters）、劇情大綱顯示及百分比標準化評估指標（NDCG/Recall/Novelty/ILD）。
 
 ## 📊 Experimental Results (Test Set)
 
@@ -172,9 +176,9 @@ python -m streamlit run app.py
 # 專題 Demo 展示特化版
 python -m streamlit run demo_app.py
 ```
-> 若啟動前端時發生資料存取錯誤，請先確保已按上述步驟下載並配置好對應之資料集。
-
-> **Week 5 LLM 模式（選用）**：若要啟用 `gpt-4o-mini` 語意解析，請在 Streamlit 介面中勾選「🤖 使用 LLM 語意解析」並輸入 OpenAI API Key。未提供 API Key 時系統將自動 fallback 至規則式解析，不影響基本功能。
+> **Week 5 LLM 模式（選用）**：若要啟用 `gpt-4o-mini` 語意解析，請在 Streamlit 介面中勾選「🤖 使用 LLM 語意解析」並輸入 OpenAI API Key。
+>
+> **Week 7 TMDB 模式（選用）**：若要推薦資料庫外的最新電影，請在側邊欄輸入你的 TMDB API Key。系統會自動將外部新電影標記為 🟣 **TMDB** 並進行多目標排序。
 
 ## 未來展望
 - **Deep Learning Ranking Models**：嘗試將現行 LambdaRank 樹狀架構替換或增強為神經網路排序架構。

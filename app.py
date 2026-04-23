@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from movie_lgb_recommender import run_recommender_pipeline
+from tmdb_api import TMDBClient
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -47,6 +48,14 @@ if st.sidebar.button("✨ NLP 動態推薦 (Week 5)", use_container_width=True):
     st.session_state['page_selection'] = "✨ NLP 動態推薦 (Week 5)"
 if st.sidebar.button("📈 方法比較與分析 (Week 6)", use_container_width=True):
     st.session_state['page_selection'] = "📈 方法比較與分析 (Week 6)"
+
+st.sidebar.markdown("---")
+st.sidebar.header("🌐 外部資料整合 (Week 7)")
+tmdb_api_key = st.sidebar.text_input("TMDB API Key", type="password", help="請輸入 TMDB API Key 以啟用新電影推薦功能")
+if not tmdb_api_key:
+    st.sidebar.info("💡 輸入 API Key 可推薦資料庫外的新電影")
+else:
+    st.sidebar.success("✅ TMDB 已就緒")
 
 page_selection = st.session_state['page_selection']
 
@@ -241,9 +250,22 @@ elif page_selection == "✨ NLP 動態推薦 (Week 5)":
             else:
                 parsed = parse_query_rule(query)
 
+            # ── 整合 TMDB 候選電影 ─────────────────────────────────
+            final_candidates = user_candidates.copy()
+            final_candidates['source'] = 'movielens'
+            
+            if tmdb_api_key:
+                with st.status("🌐 正在從 TMDB 抓取外部候選電影...", expanded=False):
+                    tmdb_client = TMDBClient(tmdb_api_key)
+                    tmdb_df = tmdb_client.get_candidates(selected_user_id, count=50, genre_cols=genre_cols)
+                    if not tmdb_df.empty:
+                        # 確保欄位一致後合併
+                        final_candidates = pd.concat([final_candidates, tmdb_df], ignore_index=True)
+                        st.write(f"已加入 {len(tmdb_df)} 部 TMDB 新電影至候選池")
+
             objectives = parsed["objectives"]
             pareto_nlp_df = dynamic_pareto_rerank(
-                user_candidates, genre_cols, objectives,
+                final_candidates, genre_cols, objectives,
                 k=top_k, parsed_result=parsed
             )
 
@@ -289,7 +311,14 @@ elif page_selection == "✨ NLP 動態推薦 (Week 5)":
             pareto_nlp_df.loc[pareto_nlp_df['release_year'] == '0', 'release_year'] = "Unknown"
             
         # 決定要印出來的欄位
-        display_cols = ['movie_title']
+        display_cols = []
+        
+        # 加上來源圖示
+        if 'source' in pareto_nlp_df.columns:
+            pareto_nlp_df['來源'] = pareto_nlp_df['source'].apply(lambda x: "🟣 TMDB" if x == 'tmdb' else "🔵 Local")
+            display_cols.append('來源')
+            
+        display_cols.append('movie_title')
         if 'release_year' in pareto_nlp_df.columns:
             display_cols.append('release_year')
             
