@@ -47,9 +47,11 @@
   - **Soft Selection（軟性選取）**：不以硬性 Pareto 層切斷候選集，而是將各 item 所在的層級（Layer Benefit = `1 / layer`）與加權分數（`relevance_weight × score + novelty_weight × novelty`）融合為統一排序依據，允許層級較深但分數優異的 item 重回推薦名單，顯著改善 NDCG。
   - **Weighted Tie-break 排序（第二階段）**：在選出候選集後，以可調整比例（預設 `0.85 × relevance + 0.15 × novelty`）進行最終全局重排序。Tie-break 負責的問題是「已選 item 的呈現順序」，與 Pareto 的篩選角色明確分離。
   - **較大候選池（`pool_size = 100`）**：擴大初始候選範圍，讓 Pareto 有更充足的空間識別具潛力的冷門 / 高品質電影。
-- **Week 5: Natural-Language Condition Mapping (`week5_nlp_pareto.py`)**
-  - 定位為 Rule-based query-to-objective recommender。
-  - 將自然語言條件對應至推薦目標（Natural-Language Condition Mapping），實現基於查詢條件的偏好微調（Query-conditioned preference adjustment）。重點在於解析語意條件（如：「近期上映且多樣化的好片」）並動態觸發 Pareto/MMR 的目標權重，而非訓練大型語言模型。
+- **Week 5: LLM-Assisted Semantic Parsing (`week5_nlp_pareto.py`)**
+  - 本模組定位為「LLM-assisted semantic parsing for rule-based recommendation control」，採用三層架構：
+    1. **語意解析層**：支援兩種模式。預設為 `parse_query_rule()`（強度分級規則式解析，含否定語意翻轉）；可選啟用 `parse_query_llm()`，以 OpenAI `gpt-4o-mini` 作為 semantic parser 將自然語言轉為結構化條件，若 API 呼叫失敗則自動 fallback。
+    2. **結構化條件層**：輸出統一 Schema（`weights` / `constraints` / `objectives` / `explanation`），支援目標權重化（非 on/off）、強度分級（稍微冷門 / 冷門 / 超冷門）與 rule-based 約束（如 `min_quality`、`min_novelty`）。
+    3. **Ranking 控制層**：`dynamic_pareto_rerank()` 依解析結果動態調整 Pareto 篩選目標與 tie-break 加權比例，後端全程維持 rule-based / score-based，保持可解釋性。
 - **Week 6: System-Level Evaluation (`week6_evaluation.py`)**
   - 建構大規模的 Batch 評測環境。繪製 NDCG vs. Novelty 及 NDCG vs. ILD 的 Trade-off 曲線，量化並比較各階段演算法的實質效益。
 
@@ -171,6 +173,8 @@ python -m streamlit run app.py
 python -m streamlit run demo_app.py
 ```
 > 若啟動前端時發生資料存取錯誤，請先確保已按上述步驟下載並配置好對應之資料集。
+
+> **Week 5 LLM 模式（選用）**：若要啟用 `gpt-4o-mini` 語意解析，請在 Streamlit 介面中勾選「🤖 使用 LLM 語意解析」並輸入 OpenAI API Key。未提供 API Key 時系統將自動 fallback 至規則式解析，不影響基本功能。
 
 ## 未來展望
 - **Deep Learning Ranking Models**：嘗試將現行 LambdaRank 樹狀架構替換或增強為神經網路排序架構。
