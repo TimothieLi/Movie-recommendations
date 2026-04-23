@@ -194,45 +194,93 @@ elif page_selection == "🏆 Re-ranking 演算法 (Week 4)":
 
 elif page_selection == "✨ NLP 動態推薦 (Week 5)":
     # ==========================================
-    # 6. Week 5: NLP 動態目標推薦
+    # 6. Week 5: LLM-Assisted Semantic Parsing + Dynamic Pareto Re-ranking
     # ==========================================
-    st.markdown("### ✨ Week 5: NLP 動態目標推薦")
-    
-    from week5_nlp_pareto import parse_query, dynamic_pareto_rerank
+    st.markdown("### ✨ Week 5: LLM-Assisted NLP 動態推薦")
+    st.caption("本模組採用「語意解析 → 結構化條件 → Rule-based Ranking」三層架構，將自然語言查詢轉為可解釋的多目標推薦控制訊號。")
+
+    from week5_nlp_pareto import parse_query_rule, parse_query_llm, dynamic_pareto_rerank
     import time
-    
-    query = st.text_input("💬 想找什麼樣的電影？ (輸入完成請按 Enter)", placeholder="例如：推薦冷門且高評價電影", value="推薦冷門且多樣的電影")
-    
-    col1, col2 = st.columns(2)
+
+    # ── 使用者輸入 ─────────────────────────────────────────────────
+    query = st.text_input(
+        "💬 想找什麼樣的電影？ (輸入完成請按 Enter)",
+        placeholder="例如：推薦冷門但評價不錯的電影",
+        value="推薦稍微冷門但很好看的電影"
+    )
+
+    col1, col2, col3 = st.columns(3)
     with col1:
         top_k = st.selectbox("📌 推薦輸出數量", [10, 20, 30, 50], index=0)
     with col2:
-        st.write("") # 空間排版用
-        st.write("")
-        sort_by_year = st.checkbox("📅 結果依照年份排序 (由新到舊)")
-    
+        sort_by_year = st.checkbox("📅 結果依年份排序（由新到舊）")
+    with col3:
+        use_llm = st.checkbox("🤖 使用 LLM 語意解析（需 API Key）", value=False)
+
+    openai_api_key = None
+    if use_llm:
+        openai_api_key = st.text_input("🔑 OpenAI API Key", type="password",
+                                       placeholder="sk-...")
+
     user_candidates = unseen_candidates[unseen_candidates['user_id'] == selected_user_id].copy()
-    
+
     genre_cols = [
         "unknown", "Action", "Adventure", "Animation",
         "Children's", "Comedy", "Crime", "Documentary", "Drama", "Fantasy",
         "Film-Noir", "Horror", "Musical", "Mystery", "Romance", "Sci-Fi",
         "Thriller", "War", "Western"
     ]
-    
+
     if query:
-        # 動態效果
         with st.spinner("🧠 進行語意解析與推薦計算中..."):
-            time.sleep(0.8) # 保留適度的運算停頓感
-            
-            objectives = parse_query(query)
-            pareto_nlp_df = dynamic_pareto_rerank(user_candidates, genre_cols, objectives, k=top_k)
-            
+            time.sleep(0.6)
+
+            # ── 語意解析（LLM 或 Rule-based）────────────────────────
+            if use_llm and openai_api_key:
+                parsed = parse_query_llm(query, api_key=openai_api_key)
+            else:
+                parsed = parse_query_rule(query)
+
+            objectives = parsed["objectives"]
+            pareto_nlp_df = dynamic_pareto_rerank(
+                user_candidates, genre_cols, objectives,
+                k=top_k, parsed_result=parsed
+            )
+
+        # ── 解析結果展示（可解釋性面板）──────────────────────────────
+        parser_label = {"llm": "🤖 LLM", "rule_based": "📐 Rule-based",
+                        "rule_based_fallback": "📐 Rule-based (LLM fallback)"
+                        }.get(parsed.get("_parser", "rule_based"), "📐 Rule-based")
+
+        st.success(f"✅ 解析完成（{parser_label}）")
+
+        with st.expander("🔍 語意解析結果（可解釋性展示）", expanded=True):
+            st.markdown(f"**📝 解析說明：** {parsed['explanation']}")
+
+            st.markdown("**🎛️ 目標維度權重：**")
+            weight_cols = st.columns(5)
+            dim_labels = {"relevance": "個人偏好", "novelty": "冷門度",
+                          "diversity": "多樣性", "recency": "近期新穎", "quality": "評分品質"}
+            for idx, (dim, label) in enumerate(dim_labels.items()):
+                w = parsed["weights"].get(dim, 0.0)
+                weight_cols[idx].metric(label=label, value=f"{w:.0%}")
+
+            # 顯示有效 constraints
+            active_constraints = {k: v for k, v in parsed["constraints"].items() if v is not None}
+            if active_constraints:
+                st.markdown("**🔒 啟用的 Rule-based 約束：**")
+                c_labels = {"min_quality": "最低品質門檻", "max_novelty": "最大冷門度上限",
+                            "min_novelty": "最小冷門度下限", "min_recency": "最低年份新穎度"}
+                for ck, cv in active_constraints.items():
+                    st.markdown(f"- `{c_labels.get(ck, ck)}`：≥ {cv:.2f}" if "min" in ck
+                                else f"- `{c_labels.get(ck, ck)}`：≤ {cv:.2f}")
+
+            if parsed.get("_llm_error"):
+                st.warning(f"⚠️ LLM 解析失敗（已自動 fallback）：{parsed['_llm_error']}")
+
         if len(objectives) == 0:
-            st.warning("⚠️ 無法從你的輸入解析出具體目標（冷門、多樣、新、評價），系統將預設純使用 LightGBM 分數。")
-        else:
-            st.success(f"🎯 成功捕捉語意意圖！目標維度設定為: **{', '.join(objectives)}**")
-            
+            st.info("ℹ️ 未偵測到特定目標維度，以個人偏好（predict_score）為主進行推薦。")
+
         st.toast('推薦計算完成！', icon='🎉')
         
         # 整理年份顯示格式
