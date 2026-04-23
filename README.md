@@ -58,6 +58,11 @@
   - **TMDB API 整合**：導入資料庫外（Out-of-database）推薦功能。透過 TMDB Discover API 即時抓取最新、熱門或高評價電影，並與本地 MovieLens 候選集動態融合。
   - **跨域特徵對齊**：自動將 TMDB 元數據轉化為系統可理解的 `Novelty`、`Recency` 與 `Quality` 特徵，使外部電影能無縫參與 Pareto 重排序。
   - **展示中心升級**：`demo_app.py` 進化為「研究成果展示板」，支援單一方法深度檢視、電影海報牆（Featured Posters）、劇情大綱顯示及百分比標準化評估指標（NDCG/Recall/Novelty/ILD）。
+- **Week 8: UI/UX Refactoring & Dual-Mode System (`demo_app.py`)**
+  - **雙模式架構（Mode Isolation）**：重構展示介面，完全隔離「離線評估（Offline Evaluation）」與「互動式推薦（Interactive Recommendation）」。
+  - **按鈕式持久化導覽**：採用 `st.session_state` 實作按鈕式切換，解決 Streamlit 頁面重整導致的選擇遺失問題，並提供更流暢的視覺回饋。
+  - **解析度可視化優化**：在互動模式下，將 NLP 解析權重正規化為 100% 佔比顯示（Relative Importance），並以卡片式 Scorecard 呈現，讓使用者直觀理解各維度對 Final Score 的影響力。
+  - **冷啟動體驗優化**：在互動模式中移除 User-specific 的 LightGBM 偏好欄位與 Raw JSON debug 資訊，將介面焦點完全鎖定在 Query-based 的推薦結果與可解釋性說明。
 
 ## 📊 Experimental Results (Test Set)
 

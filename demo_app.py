@@ -38,62 +38,57 @@ def load_pipeline():
 test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates = load_pipeline()
 
 # ─────────────────────────────────────────────
-# 2. 側邊欄：輸入控制項
+# 2. 側邊欄：模式切換與控制
 # ─────────────────────────────────────────────
+if 'system_mode' not in st.session_state:
+    st.session_state['system_mode'] = '離線評估'
+
 with st.sidebar:
-    st.header("🕹️ 控制面板")
-    st.markdown("---")
-
-    # User ID
-    user_id = st.selectbox(
-        "👤 選擇 User ID",
-        options=test_users,
-        index=0,
-    )
-    if user_id not in test_users:
-        st.warning("此 ID 不在 Test Set 中，請重新輸入。")
-
-    st.markdown("---")
-
-    # 推薦方法
-    method = st.selectbox(
-        "🔧 推薦方法",
-        options=["Baseline", "MMR", "Pareto", "Pareto + NLP"],
-        index=0,
-    )
+    st.header("🎮 系統模式選擇")
+    if st.button("📊 離線評估", use_container_width=True, type="primary" if st.session_state['system_mode'] == '離線評估' else "secondary"):
+        st.session_state['system_mode'] = '離線評估'
+        st.rerun()
+    if st.button("💬 互動式推薦", use_container_width=True, type="primary" if st.session_state['system_mode'] == '互動式推薦' else "secondary"):
+        st.session_state['system_mode'] = '互動式推薦'
+        st.rerun()
     
-    # MMR Lambda（只在 MMR 時顯示）
-    lambda_val = 0.5
-    if method == "MMR":
-        lambda_val = st.slider("λ (Relevance ↔ Diversity 權衡)", 0.0, 1.0, 0.5, 0.25)
-        st.caption("λ=1.0 → 完全看分數；λ=0.0 → 最大化多樣性")
-    
-    st.markdown("---")
-
-    # NLP Prompt（只在 Pareto + NLP 時顯示）
-    nlp_prompt = ""
-    if method == "Pareto + NLP":
-        nlp_prompt = st.text_input(
-            "💬 NLP Prompt",
-            value="推薦冷門且多樣的電影",
-            placeholder="例：推薦新電影、推薦冷門高評價電影"
-        )
-        st.caption("支援關鍵字：冷門、多樣、新、評價")
-
+    mode = st.session_state['system_mode']
     st.markdown("---")
     
-    st.header("🌐 外部資料整合")
-    tmdb_api_key = st.text_input("TMDB API Key", type="password", help="輸入 API Key 啟用 TMDB 推薦")
-    if tmdb_api_key:
-        st.success("✅ TMDB 整合已開啟")
-
-    st.markdown("---")
-
-    # Top-K
-    top_k = st.selectbox("📌 推薦數量 (Top-K)", [10, 15, 20], index=0)
-
-    # 執行按鈕
-    run_btn = st.button("🚀 產生推薦", type="primary", use_container_width=True)
+    if mode == "離線評估":
+        st.header("📊 評估設定")
+        user_id = st.selectbox("👤 選擇測試使用者 (Test Set)", options=test_users, index=0)
+        method = st.selectbox("🔧 推薦演算法", options=["Baseline", "MMR", "Pareto"], index=0)
+        
+        lambda_val = 0.5
+        if method == "MMR":
+            lambda_val = st.slider("λ (Relevance ↔ Diversity)", 0.0, 1.0, 0.5, 0.25)
+        
+        top_k = st.selectbox("📌 推薦數量 (Top-K)", [10, 15, 20], index=0)
+        # 離線評估不使用 TMDB 與 NLP
+        tmdb_api_key = None
+        nlp_prompt_sidebar = ""
+        use_llm = False
+        openai_api_key = None
+        run_btn = st.button("🚀 產生推薦", type="primary", use_container_width=True)
+        
+    else:  # 互動式推薦
+        st.header("⚙️ 推薦設定")
+        with st.expander("🤖 LLM 解析設定"):
+            use_llm = st.checkbox("啟用 LLM 語意解析")
+            openai_api_key = st.text_input("OpenAI API Key", type="password")
+            
+        with st.expander("🌐 外部資料整合"):
+            tmdb_api_key = st.text_input("TMDB API Key", type="password", help="輸入 API Key 啟用 TMDB 推薦")
+            if tmdb_api_key:
+                st.success("✅ TMDB 整合已開啟")
+        
+        top_k = st.selectbox("📌 推薦數量 (Top-K)", [10, 15, 20], index=0)
+        # 互動模式固定使用 NLP-Pareto 邏輯，User 固定用第一個作為基礎特徵參考（但不顯示）
+        method = "Pareto + NLP"
+        user_id = test_users[0] 
+        lambda_val = 0.5
+        run_btn = False # 由主頁面按鈕觸發
 
 # ─────────────────────────────────────────────
 # 3. 核心推薦函式
@@ -132,10 +127,13 @@ def recommend_pareto(candidates, k):
     from week4_reranking import pareto_rerank
     return pareto_rerank(candidates, k=k)
 
-def recommend_nlp_pareto(candidates, k, prompt):
-    from week5_nlp_pareto import parse_query, dynamic_pareto_rerank
-    objectives = parse_query(prompt)
-    return dynamic_pareto_rerank(candidates, GENRE_COLS, objectives, k=k), objectives
+def recommend_nlp_pareto(candidates, k, prompt, use_llm=False, api_key=None):
+    from week5_nlp_pareto import parse_query_rule, parse_query_llm, dynamic_pareto_rerank
+    if use_llm and api_key:
+        parsed = parse_query_llm(prompt, api_key=api_key)
+    else:
+        parsed = parse_query_rule(prompt)
+    return dynamic_pareto_rerank(candidates, GENRE_COLS, parsed["objectives"], k=k, parsed_result=parsed), parsed
 
 # ─────────────────────────────────────────────
 # 4. 顯示輔助函式
@@ -155,8 +153,10 @@ def format_display(df, method_name, liked_ids=None):
     # 基本欄位
     base_cols = {
         'movie_title': 'Movie Title',
-        'predict_score': 'Preference (LGB)',
     }
+    # 離線模式才顯示模型預測分數
+    if method_name != "Pareto + NLP":
+        base_cols['predict_score'] = 'Preference (LGB)'
     # 如果有 TMDB 特徵就加入
     optional_cols = {
         'source': 'Source',
@@ -166,13 +166,15 @@ def format_display(df, method_name, liked_ids=None):
     }
     # 方法專屬欄位
     method_cols = {}
-    if method_name == "Pareto" or method_name == "Pareto + NLP":
-        method_cols = {'pareto_rank': 'Pareto Rank', 'diversity': 'Diversity'}
-    elif method_name == "MMR":
+    if method_name == "MMR":
         method_cols = {'mmr_score': 'MMR Score', 'similarity_penalty': 'Sim Penalty'}
-        # 額外顯示 lambda 以便觀察
         df['lambda'] = lambda_val
         method_cols['lambda'] = 'Lambda (λ)'
+    elif method_name == "Pareto":
+        method_cols = {'pareto_rank': 'Pareto Rank', 'diversity': 'Diversity'}
+    elif method_name == "Pareto + NLP":
+        # 互動模式移除內部過程欄位，顯示最終分數
+        method_cols = {'final_score': 'Final Score'}
 
     all_wanted = {**base_cols, **optional_cols, **method_cols}
     existing = {k: v for k, v in all_wanted.items() if k in df.columns}
@@ -184,141 +186,128 @@ def format_display(df, method_name, liked_ids=None):
     display.index.name = "Rank"
     return display.round(4)
 
-# ─────────────────────────────────────────────
-# 5. 主要顯示區域
-# ─────────────────────────────────────────────
-# 上半：顯示目前設定摘要
-info_cols = st.columns(4)
-info_cols[0].metric("👤 User ID", user_id)
-info_cols[1].metric("🔧 Method", method)
-info_cols[2].metric("📌 Top-K", top_k)
-info_cols[3].metric("💬 Prompt", nlp_prompt if nlp_prompt else "—")
-
-st.markdown("---")
-
-if not run_btn:
-    st.info("👈 調整左側設定完成後，點擊「🚀 產生推薦」按鈕查看結果。")
-    st.stop()
-
-# ─────────────────────────────────────────────
-# 6. 執行推薦並顯示結果
-# ─────────────────────────────────────────────
-candidates = get_candidates(user_id)
-
-if candidates.empty:
-    st.error(f"User {user_id} 沒有可用的候選電影，請換一個 User ID。")
-    st.stop()
-
-# 執行選定方法
-objectives = []
-with st.spinner(f"⚙️ 執行 {method} 推薦中…"):
-    if method == "Baseline":
-        result_df = recommend_baseline(candidates, top_k)
-    elif method == "MMR":
-        result_df = recommend_mmr(candidates, top_k, lambda_val)
-    elif method == "Pareto":
-        result_df = recommend_pareto(candidates, top_k)
-    elif method == "Pareto + NLP":
-        result_df, objectives = recommend_nlp_pareto(candidates, top_k, nlp_prompt)
-
-# ─────────────────────────────────────────────
-# 7. 呈現推薦結果 (單一方法模式)
-# ─────────────────────────────────────────────
-
-# --- 取得 Ground Truth 用於星星標記 ---
-actual = test_ground_truth.get(user_id, {})
-liked_ids = [mid for mid, r in actual.items() if r >= 3.0]
-
-# (1) 主推薦結果表格
-method_icons = {"Baseline": "📋", "MMR": "🔀", "Pareto": "⚖️", "Pareto + NLP": "✨"}
-method_captions = {
-    "Baseline": "僅考慮個人偏好預測分數（LightGBM LambdaRank），不進行額外重排序。",
-    "MMR": "最大邊際相關性（Maximal Marginal Relevance），平衡「相關性」與「多樣性」，避免推薦內容過於雷同。",
-    "Pareto": "多目標 Pareto 重排序，同時優化相關性與新穎度（Novelty），尋找兩者的最佳均衡點。",
-    "Pareto + NLP": "結合 LLM 語意解析與 Pareto 演算法，將您的自然語言需求動態轉化為推薦目標權重。"
-}
-
-st.subheader(f"{method_icons.get(method, '🎬')} 1. {method} 推薦結果" + (f" (λ={lambda_val})" if method == "MMR" else ""))
-st.caption(f"{method_captions.get(method, '')} (⭐ 代表命中使用者真實喜歡的電影)")
-
-# 顯示主要結果表格
-st.dataframe(format_display(result_df, method, liked_ids=liked_ids), use_container_width=True)
-
-st.markdown("---")
-
-# (2) 推薦詳情 (Featured Movies)
-st.subheader(f"🌟 2. 精選推薦詳情 (Featured Details)")
-if method == "Pareto + NLP":
-    if objectives:
-        st.success(f"🎯 NLP 解析意圖：目標維度 → **{', '.join(objectives)}**")
-    else:
-        st.warning("⚠️ 未能解析出明確目標，已退回個人偏好排序。")
-
-# 只取前 5 部展示詳細資訊
-featured_df = result_df.head(5).copy()
-for idx, row in featured_df.iterrows():
-    with st.container():
-        col1, col2 = st.columns([1, 4])
-        poster_url = row.get('poster_path')
-        if not poster_url or pd.isna(poster_url):
-            poster_url = "https://via.placeholder.com/150x225?text=No+Poster"
-        with col1:
-            st.image(poster_url, use_container_width=True)
-        with col2:
-            st.markdown(f"### {idx+1}. {row['movie_title']}")
-            source_tag = "🟣 TMDB" if row.get('source') == 'tmdb' else "🔵 Local"
-            year = row.get('release_year', 'Unknown')
-            st.markdown(f"**來源**: {source_tag} | **年份**: {year}")
-            active_genres = [g for g in GENRE_COLS if row.get(g) == 1]
-            if active_genres:
-                st.markdown(f"**類型**: {' · '.join(active_genres)}")
-            overview = row.get('overview', "尚無電影簡介資訊。")
-            if pd.isna(overview) or not overview:
-                overview = "尚無電影簡介資訊。"
-            st.write(overview)
-            score_cols = st.columns(3)
-            score_cols[0].caption(f"⭐ 預測分數: {row.get('predict_score', 0):.2f}")
-            score_cols[1].caption(f"🔍 新穎度: {row.get('novelty', 0):.2f}")
-            score_cols[2].caption(f"📅 新舊度: {row.get('recency', 0):.2f}")
-        st.markdown("---")
-
-# (3) 效能評估指標
-st.subheader("📈 3. 效能評估指標")
-preds = result_df['movie_id'].tolist()
-m_ndcg = ndcg_at_k(actual, preds, k=top_k)
-m_recall = recall_at_k(actual, preds, k=top_k, threshold=3.0)
-m_novelty = calculate_novelty_at_k(result_df)
-m_ild = calculate_ild_at_k(result_df, GENRE_COLS)
-
-metrics_data = {
-    "指標項目": ["NDCG@K (排序品質)", "Recall@K (召回率)", "Avg Novelty (新穎度)", "ILD (多樣性)"],
-    "數值": [
-        f"{m_ndcg*100:.2f}%", 
-        f"{m_recall*100:.2f}%", 
-        f"{m_novelty*100:.2f}%", 
-        f"{m_ild*100:.2f}%"
-    ],
-    "說明": [
-        "越高代表推薦順序越符合使用者真實喜好",
-        "越高代表推薦清單中包含越多使用者喜歡的電影",
-        "越高代表推薦了越多冷門/小眾的驚喜電影",
-        "越高代表推薦清單中電影類型的差異度越大"
-    ]
-}
-st.table(pd.DataFrame(metrics_data))
-
-st.markdown("---")
-
-# (4) 該使用者真正喜歡清單 (Ground Truth)
-st.subheader("✅ 4. 該使用者的真實喜歡清單 (Test Set Ground Truth)")
-liked_ids = [mid for mid, r in actual.items() if r >= 3.0]
-if liked_ids:
-    liked_movies = movies_df[movies_df['movie_id'].isin(liked_ids)][['movie_id', 'movie_title']].copy()
-    liked_movies['Rating'] = liked_movies['movie_id'].map(actual)
-    liked_movies = liked_movies.sort_values('Rating', ascending=False).reset_index(drop=True)
-    liked_movies.index += 1
-    liked_movies.index.name = "#"
-    with st.expander(f"點擊展開（共 {len(liked_movies)} 部高評價電影紀錄）"):
-        st.dataframe(liked_movies[['movie_title', 'Rating']], use_container_width=True)
+# 上半：顯示目前標題
+if mode == "離線評估":
+    st.markdown(f"## 🛸 離線效能評估")
+    st.markdown("---")
 else:
-    st.info("這名使用者在 Test Set 中沒有高於 3 分的評分紀錄。")
+    # 互動模式移除多餘標題與分隔線，直接進入輸入區
+    pass
+
+if mode == "離線評估":
+    if not run_btn:
+        st.info("👈 調整左側設定完成後，點擊「🚀 產生推薦」按鈕查看結果。")
+        st.stop()
+    candidates = get_candidates(user_id)
+    # --- 執行離線評估 ---
+    with st.spinner(f"⚙️ 執行 {method} 離線評估中…"):
+        if method == "Baseline":
+            result_df = recommend_baseline(candidates, top_k)
+        elif method == "MMR":
+            result_df = recommend_mmr(candidates, top_k, lambda_val)
+        elif method == "Pareto":
+            result_df = recommend_pareto(candidates, top_k)
+
+    actual = test_ground_truth.get(user_id, {})
+    liked_ids = [mid for mid, r in actual.items() if r >= 3.0]
+
+    st.subheader(f"📋 1. {method} 推薦結果 (Offline)")
+    st.dataframe(format_display(result_df, method, liked_ids=liked_ids), use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("📈 2. 離線效能指標 (Metrics)")
+    preds = result_df['movie_id'].tolist()
+    m_ndcg = ndcg_at_k(actual, preds, k=top_k)
+    m_recall = recall_at_k(actual, preds, k=top_k, threshold=3.0)
+    m_novelty = calculate_novelty_at_k(result_df)
+    m_ild = calculate_ild_at_k(result_df, GENRE_COLS)
+
+    metrics_data = {
+        "指標項目": ["NDCG@K", "Recall@K", "Avg Novelty", "ILD (Diversity)"],
+        "數值": [f"{m_ndcg*100:.2f}%", f"{m_recall*100:.2f}%", f"{m_novelty*100:.2f}%", f"{m_ild*100:.2f}%"],
+        "說明": ["排序準確度", "喜好命中率", "驚喜度/冷門度", "類型多樣性"]
+    }
+    st.table(pd.DataFrame(metrics_data))
+
+    if user_id:
+        st.markdown("---")
+        st.subheader("✅ 3. 真實喜歡清單 (Ground Truth)")
+        with st.expander("點擊展開該使用者的歷史高評分紀錄"):
+            liked_movies = movies_df[movies_df['movie_id'].isin(liked_ids)].copy()
+            liked_movies['Rating'] = liked_movies['movie_id'].map(actual)
+            st.dataframe(liked_movies[['movie_title', 'Rating']].sort_values('Rating', ascending=False), use_container_width=True)
+
+else:  # 互動式推薦
+    st.markdown("### 💬 互動式推薦需求輸入")
+    st.write("請輸入你想看的電影需求（例：給我一些年代久遠的經典片），系統將根據語意解析動態調整推薦權重。")
+    
+    col_input, col_run = st.columns([4, 1])
+    with col_input:
+        nlp_prompt = st.text_input(
+            "自然語言需求",
+            placeholder="例如：推薦冷門但高評價的電影",
+            label_visibility="collapsed"
+        )
+    with col_run:
+        interactive_run = st.button("🚀 產生推薦", type="primary", use_container_width=True)
+
+    if interactive_run:
+        if not nlp_prompt:
+            st.warning("請輸入需求描述後再執行推薦。")
+            st.stop()
+            
+        candidates = get_candidates(user_id)
+        # --- 執行互動式推薦 ---
+        with st.spinner("🧠 語意解析與跨域推薦計算中…"):
+            result_df, parsed = recommend_nlp_pareto(candidates, top_k, nlp_prompt, use_llm=use_llm, api_key=openai_api_key)
+
+        # 1. 語意解析說明
+        st.subheader("💡 1. 語意解析說明 (Explainability)")
+        p_type = parsed.get("_parser", "rule_based")
+        st.success(f"✅ 解析完成 ({p_type.upper()})")
+        
+        # 顯示目標維度權重 (正規化至 100% 顯示)
+        weights = parsed.get("weights", {})
+        if weights:
+            st.markdown("**🎯 目標維度佔比 (Relative Importance)**")
+            total_w = sum(weights.values())
+            if total_w == 0: total_w = 1.0
+            
+            w_cols = st.columns(5)
+            w_cols[0].metric("個人偏好", f"{(weights.get('relevance', 0)/total_w)*100:.0f}%")
+            w_cols[1].metric("冷門度", f"{(weights.get('novelty', 0)/total_w)*100:.0f}%")
+            w_cols[2].metric("多樣性", f"{(weights.get('diversity', 0)/total_w)*100:.0f}%")
+            w_cols[3].metric("新舊度", f"{(weights.get('recency', 0)/total_w)*100:.0f}%")
+            w_cols[4].metric("評分品質", f"{(weights.get('quality', 0)/total_w)*100:.0f}%")
+            st.caption("註：佔比代表各維度對最終排序分數（Final Score）的相對貢獻權重。")
+
+        st.markdown("---")
+        
+        # 2. 精選推薦詳情 (Top 5 Featured) - 移到前面
+        st.subheader("🌟 2. 精選推薦詳情 (Top 5 Featured)")
+        for idx, row in result_df.head(5).iterrows():
+            with st.container():
+                col1, col2 = st.columns([1, 4])
+                poster_url = row.get('poster_path', "https://via.placeholder.com/150x225?text=No+Poster")
+                if pd.isna(poster_url): poster_url = "https://via.placeholder.com/150x225?text=No+Poster"
+                with col1: st.image(poster_url, use_container_width=True)
+                with col2:
+                    st.markdown(f"### {idx+1}. {row['movie_title']}")
+                    st.markdown(f"**來源**: {'🟣 TMDB' if row.get('source') == 'tmdb' else '🔵 Local'} | **年份**: {row.get('release_year', 'Unknown')}")
+                    active_genres = [g for g in GENRE_COLS if row.get(g) == 1]
+                    if active_genres: st.markdown(f"**類型**: {' · '.join(active_genres)}")
+                    st.write(row.get('overview', "尚無電影簡介資訊。"))
+                    
+                    # 顯示最終分數與特徵
+                    s_cols = st.columns(4)
+                    s_cols[0].caption(f"🏆 Final Score: {row.get('final_score', 0):.4f}")
+                    s_cols[1].caption(f"🔍 Novelty: {row.get('novelty', 0):.2f}")
+                    s_cols[2].caption(f"📅 Recency: {row.get('recency', 0):.2f}")
+                    s_cols[3].caption(f"⭐ Quality: {row.get('quality', 0):.2f}")
+                st.markdown("---")
+
+        # 3. 推薦結果表格 - 移到後面
+        st.subheader("🎬 3. 推薦結果與詳情")
+        st.dataframe(format_display(result_df, "Pareto + NLP"), use_container_width=True)
+    else:
+        st.info("💡 請在上方輸入框描述您的電影需求，然後點擊「產生推薦」。")

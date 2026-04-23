@@ -461,8 +461,8 @@ def dynamic_pareto_rerank(user_candidates, genre_cols, objectives,
             if dim in final_df.columns and w.get(dim, 0) > 0:
                 score += w.get(dim, 0) * final_df[dim]
 
-        final_df['_tiebreak_score'] = score
-        final_df = final_df.sort_values('_tiebreak_score', ascending=False)
+        final_df['final_score'] = score
+        final_df = final_df.sort_values('final_score', ascending=False)
         final_df.drop(columns=[c for c in ['_pref_norm', '_tiebreak_score'] if c in final_df.columns], inplace=True)
 
     elif tie_break == 'weighted':
@@ -472,12 +472,12 @@ def dynamic_pareto_rerank(user_candidates, genre_cols, objectives,
             final_df[novelty_col] = 0.0
         final_df = final_df.copy()
         final_df['_predict_score_norm'] = tb_scaler.fit_transform(final_df[['predict_score']])
-        final_df['_tiebreak_score'] = (
+        final_df['final_score'] = (
             0.7 * final_df['_predict_score_norm'] +
             0.3 * final_df[novelty_col]
         )
-        final_df = final_df.sort_values('_tiebreak_score', ascending=False)
-        final_df.drop(columns=['_predict_score_norm', '_tiebreak_score'], inplace=True)
+        final_df = final_df.sort_values('final_score', ascending=False)
+        final_df.drop(columns=['_predict_score_norm', '_tiebreak_score'], inplace=True, errors='ignore')
     else:
         final_df = final_df.sort_values('predict_score', ascending=False)
 
