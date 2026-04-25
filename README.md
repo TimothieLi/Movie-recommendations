@@ -6,6 +6,8 @@
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 ![LightGBM](https://img.shields.io/badge/model-LightGBM%20LambdaRank-orange)
 ![Streamlit](https://img.shields.io/badge/demo-Streamlit-red)
+ 
+🌐 **Live Demo**: [movie-recommendations-timothie.streamlit.app](https://movie-recommendations-timothie.streamlit.app)
 
 > **Can a recommender system be both accurate *and* diverse — and let the user decide the trade-off in plain language?**
 > This project answers that question by combining a LightGBM LambdaRank baseline with Pareto-based re-ranking and a rule-based NLP condition mapper, evaluated rigorously on MovieLens 100K with a strict train/val/test split.
@@ -24,6 +26,18 @@
 2. **`app.py` 與 `demo_app.py`**:
    - 基於 [Streamlit](https://streamlit.io/) 構建的前端互動介面。
    - 提供百萬級候選清單的批次推論（Batch Evaluation）與快取機制，達成 0 毫秒延遲的即時預測與多方法比較展示。
+
+## 🌐 Live Demo
+
+👉 **Try the system online**:  
+[https://movie-recommendations-timothie.streamlit.app](https://movie-recommendations-timothie.streamlit.app)
+
+This is a deployed Streamlit web application demonstrating:
+- **LightGBM LambdaRank**: Core recommendation model performance.
+- **Pareto-based Re-ranking**: Real-time multi-objective optimization (Relevance vs. Novelty).
+- **NLP-driven Control**: Dynamic objective selection using natural language queries.
+
+*No local setup is required — simply open the link and interact with the system.*
 
 ## 方法演進 (Weekly Progress Mapping)
 
@@ -184,6 +198,25 @@ python -m streamlit run demo_app.py
 > **Week 5 LLM 模式（選用）**：若要啟用 `gpt-4o-mini` 語意解析，請在 Streamlit 介面中勾選「🤖 使用 LLM 語意解析」並輸入 OpenAI API Key。
 >
 > **Week 7 TMDB 模式（選用）**：若要推薦資料庫外的最新電影，請在側邊欄輸入你的 TMDB API Key。系統會自動將外部新電影標記為 🟣 **TMDB** 並進行多目標排序。
+
+## 🚀 Deploy on Streamlit Cloud
+
+本專案已針對 **Streamlit Cloud** 進行優化，您可以輕鬆將其部署為線上 Web App。
+
+### 部署步驟
+
+1. **登入 Streamlit Cloud**：造訪 [Streamlit Cloud](https://streamlit.io/cloud) 並使用 GitHub 帳號登入。
+2. **點選 New app**：在 Dashboard 點擊右上角的 "Create app"。
+3. **選擇 GitHub repo**：選擇本專案所在的 Repository 與 Branch。
+4. **設定 Main file path**：將主程式路徑設為 `demo_app.py`。
+5. **點擊 Deploy**：系統將自動偵測 `requirements.txt` 並安裝環境。
+
+### 注意事項
+- **Python 版本**：建議在 Advanced Settings 中選擇 **Python 3.11** 以獲得最佳相容性。
+- **LightGBM 問題**：若部署時遇到 LightGBM 編譯錯誤，建議在 `requirements.txt` 中嘗試固定版本（如 `lightgbm==3.3.5`）。
+- **Secrets 管理**：若希望預設啟用 LLM 或 TMDB 功能，可在 Streamlit Cloud 的 **Secrets** 設定中加入 `OPENAI_API_KEY` 與 `TMDB_API_KEY`。
+
+After deployment, your app will be available at a public URL like `https://your-app.streamlit.app`
 
 ## 未來展望
 - **Deep Learning Ranking Models**：嘗試將現行 LambdaRank 樹狀架構替換或增強為神經網路排序架構。

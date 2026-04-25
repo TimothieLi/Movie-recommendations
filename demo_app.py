@@ -12,6 +12,15 @@ from tmdb_api import TMDBClient
 from week6_evaluation import calculate_ild_at_k, calculate_novelty_at_k
 from movie_lgb_recommender import ndcg_at_k, recall_at_k
 warnings.filterwarnings("ignore")
+ 
+# ─────────────────────────────────────────────
+# 0. 安全取得 Secrets
+# ─────────────────────────────────────────────
+def get_secret(key, default=None):
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
 
 # ─────────────────────────────────────────────
 # 頁面基本設定
@@ -66,20 +75,20 @@ with st.sidebar:
         
         top_k = st.selectbox("📌 推薦數量 (Top-K)", [10, 15, 20], index=0)
         # 離線評估不使用 TMDB 與 NLP
-        tmdb_api_key = None
+        tmdb_api_key = get_secret("TMDB_API_KEY")
         nlp_prompt_sidebar = ""
         use_llm = False
-        openai_api_key = None
+        openai_api_key = get_secret("OPENAI_API_KEY")
         run_btn = st.button("🚀 產生推薦", type="primary", use_container_width=True)
         
     else:  # 互動式推薦
         st.header("⚙️ 推薦設定")
         with st.expander("🤖 LLM 解析設定"):
-            use_llm = st.checkbox("啟用 LLM 語意解析")
-            openai_api_key = st.text_input("OpenAI API Key", type="password")
+            use_llm = st.checkbox("啟用 LLM 語意解析", value=True if get_secret("OPENAI_API_KEY") else False)
+            openai_api_key = st.text_input("OpenAI API Key", value=get_secret("OPENAI_API_KEY", ""), type="password")
             
         with st.expander("🌐 外部資料整合"):
-            tmdb_api_key = st.text_input("TMDB API Key", type="password", help="輸入 API Key 啟用 TMDB 推薦")
+            tmdb_api_key = st.text_input("TMDB API Key", value=get_secret("TMDB_API_KEY", ""), type="password", help="輸入 API Key 啟用 TMDB 推薦")
             if tmdb_api_key:
                 st.success("✅ TMDB 整合已開啟")
         

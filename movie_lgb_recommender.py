@@ -84,6 +84,8 @@ def run_recommender_pipeline(alpha=1.0, mf_weight=1.0, return_metrics=False, cal
     
     # === TMDB Metadata Integration (Week 5) ===
     tmdb_path = os.path.join('TMDB metadata', 'tmdb_5000_movies.csv')
+    if not os.path.exists(tmdb_path): tmdb_path = 'tmdb_5000_movies.csv' # Fallback to current dir
+
     if os.path.exists(tmdb_path):
         tmdb_df = pd.read_csv(tmdb_path)
         

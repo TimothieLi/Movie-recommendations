@@ -5,6 +5,12 @@ from tmdb_api import TMDBClient
 import warnings
 
 warnings.filterwarnings("ignore")
+ 
+def get_secret(key, default=None):
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
 
 # 設定頁面資訊
 st.set_page_config(page_title="Movie Recommender", layout="wide", page_icon="🎬")
@@ -51,7 +57,7 @@ if st.sidebar.button("📈 方法比較與分析 (Week 6)", use_container_width=
 
 st.sidebar.markdown("---")
 st.sidebar.header("🌐 外部資料整合 (Week 7)")
-tmdb_api_key = st.sidebar.text_input("TMDB API Key", type="password", help="請輸入 TMDB API Key 以啟用新電影推薦功能")
+tmdb_api_key = st.sidebar.text_input("TMDB API Key", value=get_secret("TMDB_API_KEY", ""), type="password", help="請輸入 TMDB API Key 以啟用新電影推薦功能")
 if not tmdb_api_key:
     st.sidebar.info("💡 輸入 API Key 可推薦資料庫外的新電影")
 else:
