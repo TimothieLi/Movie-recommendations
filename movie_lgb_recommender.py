@@ -539,8 +539,8 @@ def run_recommender_pipeline(alpha=1.0, mf_weight=1.0, return_metrics=False, cal
     print("==========================================\n")
     
     if return_metrics:
-        return test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates, avg_valid_recall, avg_valid_ndcg, avg_recall, avg_ndcg
-    return test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates
+        return test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates, avg_valid_recall, avg_valid_ndcg, avg_recall, avg_ndcg, model, features_to_use
+    return test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates, model, features_to_use
 
 def main():
     # 固定 alpha 為 0.5 (假設這是之前跑出相對穩定的值)

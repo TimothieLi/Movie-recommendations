@@ -7,6 +7,7 @@ demo_app.py — Movie Recommendation System Demo Dashboard
 import streamlit as st
 import pandas as pd
 import numpy as np
+import os
 import warnings
 from tmdb_api import TMDBClient
 from week6_evaluation import calculate_ild_at_k, calculate_novelty_at_k
@@ -41,10 +42,19 @@ st.markdown("---")
 @st.cache_data(show_spinner="⏳ 模型訓練與特徵工程中，請稍候…")
 def load_pipeline():
     from movie_lgb_recommender import run_recommender_pipeline
-    test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates = run_recommender_pipeline()
-    return sorted([int(u) for u in test_users]), top_10_df, test_ground_truth, movies_df, unseen_candidates
+    # 現在 return 7 個值：test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates, model, features_to_use
+    res = run_recommender_pipeline()
+    test_users, top_10_df, test_ground_truth, _, unseen_candidates, model, features_to_use = res
+    
+    # Step 6: 使用整合了 TMDB Metadata 的新資料
+    if os.path.exists("movies_with_metadata.csv"):
+        movies_df = pd.read_csv("movies_with_metadata.csv")
+    else:
+        movies_df = res[3]
+        
+    return sorted([int(u) for u in test_users]), top_10_df, test_ground_truth, movies_df, unseen_candidates, model, features_to_use
 
-test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates = load_pipeline()
+test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates, lgb_model, lgb_features = load_pipeline()
 
 # ─────────────────────────────────────────────
 # 2. 側邊欄：模式切換與控制
@@ -136,12 +146,44 @@ def recommend_pareto(candidates, k):
     from week4_reranking import pareto_rerank
     return pareto_rerank(candidates, k=k)
 
+def get_cold_start_candidates():
+    """取得全體電影作為冷啟動候選池"""
+    df = movies_df.copy()
+    df['source'] = 'movielens'
+    
+    # Cold-start 無個人化預測分數，使用 quality 作為基礎相關性
+    if 'predict_score' not in df.columns:
+        df['predict_score'] = df['quality'] if 'quality' in df.columns else 0.5
+    
+    # 確保關鍵維度存在
+    if 'novelty_norm' not in df.columns:
+        df['novelty_norm'] = df['novelty'] if 'novelty' in df.columns else 0.5
+    if 'quality' not in df.columns:
+        df['quality'] = 0.5
+    if 'recency' not in df.columns:
+        if 'release_year' in df.columns:
+            from sklearn.preprocessing import MinMaxScaler
+            df['recency'] = MinMaxScaler().fit_transform(df[['release_year']].fillna(df['release_year'].median()))
+        else:
+            df['recency'] = 0.5
+    return df
+
 def recommend_nlp_pareto(candidates, k, prompt, use_llm=False, api_key=None):
     from week5_nlp_pareto import parse_query_rule, parse_query_llm, dynamic_pareto_rerank
     if use_llm and api_key:
         parsed = parse_query_llm(prompt, api_key=api_key)
     else:
         parsed = parse_query_rule(prompt)
+    
+    # Fallback 機制：若無特定目標，推薦最近期電影
+    if not parsed.get("objectives"):
+        parsed["explanation"] = "⚠️ 沒有找到相符合的條件，因此推薦最近期的電影。"
+        # 直接使用 recency 排序作為結果
+        result_df = candidates.sort_values("recency", ascending=False).head(k).copy()
+        result_df['pareto_rank'] = 1
+        result_df['final_score'] = result_df['recency']
+        return result_df, parsed
+        
     return dynamic_pareto_rerank(candidates, GENRE_COLS, parsed["objectives"], k=k, parsed_result=parsed), parsed
 
 # ─────────────────────────────────────────────
@@ -166,28 +208,65 @@ def format_display(df, method_name, liked_ids=None):
     # 離線模式才顯示模型預測分數
     if method_name != "Pareto + NLP":
         base_cols['predict_score'] = 'Preference (LGB)'
+    
     # 如果有 TMDB 特徵就加入
     optional_cols = {
         'source': 'Source',
         'novelty': 'Novelty',
-        'recency': 'Recency',
-        'quality': 'Quality',
     }
+
     # 方法專屬欄位
     method_cols = {}
     if method_name == "MMR":
-        method_cols = {'mmr_score': 'MMR Score', 'similarity_penalty': 'Sim Penalty'}
-        df['lambda'] = lambda_val
-        method_cols['lambda'] = 'Lambda (λ)'
+        # MMR 順序：Penalty -> Score
+        # 根據要求移除 Source, Novelty
+        optional_cols = {}
+        method_cols = {'similarity_penalty': 'Sim Penalty', 'mmr_score': 'MMR Score'}
     elif method_name == "Pareto":
-        method_cols = {'pareto_rank': 'Pareto Rank', 'diversity': 'Diversity'}
+        # Pareto 顯示 Recency, Quality, Novelty 並加回 Pareto Rank
+        # 根據要求移除 Source
+        optional_cols = {'recency': 'Recency', 'quality': 'Quality', 'novelty': 'Novelty'}
+        method_cols = {'pareto_rank': 'Pareto Rank'}
     elif method_name == "Pareto + NLP":
         # 互動模式移除內部過程欄位，顯示最終分數
+        optional_cols.update({'recency': 'Recency', 'quality': 'Quality'})
         method_cols = {'final_score': 'Final Score'}
+    elif method_name == "Baseline":
+        # Baseline 簡化欄位，並將指定的 5 個 SHAP 特徵顯示為獨立欄位
+        optional_cols = {}
+        # 指定要顯示 SHAP 的 5 個特徵
+        shap_feat_cols = ['mf_score', 'user_avg_rating', 'user_genre_avg_score', 'cooc_hit_count', 'user_genre_max_score']
+        for col in shap_feat_cols:
+            if f'SHAP_{col}' in df.columns:
+                method_cols[f'SHAP_{col}'] = col
+        
+        # 最後加上預測分數
+        all_wanted = {}
+        all_wanted['movie_title'] = 'Movie Title'
+        for k, v in method_cols.items(): all_wanted[k] = v
+        all_wanted['predict_score'] = 'Preference (LGB)'
+        
+        existing = {k: v for k, v in all_wanted.items() if k in df.columns}
+        display = df[list(existing.keys())].copy().rename(columns=existing)
+        display.index = range(1, len(display) + 1)
+        display.index.name = "Rank"
+        return display.round(4)
+    else:
+        # 其他情況顯示完整資訊
+        optional_cols.update({'recency': 'Recency', 'quality': 'Quality'})
 
     all_wanted = {**base_cols, **optional_cols, **method_cols}
-    existing = {k: v for k, v in all_wanted.items() if k in df.columns}
+    
+    # 針對 Baseline 以外的方法重新構建順序
+    if method_name != "Baseline":
+        all_wanted = {}
+        all_wanted['movie_title'] = 'Movie Title'
+        if method_name != "Pareto + NLP":
+            all_wanted['predict_score'] = 'Preference (LGB)'
+        for k, v in optional_cols.items(): all_wanted[k] = v
+        for k, v in method_cols.items(): all_wanted[k] = v
 
+    existing = {k: v for k, v in all_wanted.items() if k in df.columns}
     display = df[list(existing.keys())].copy().rename(columns=existing)
     if 'Source' in display.columns:
         display['Source'] = display['Source'].apply(lambda x: "🟣 TMDB" if x == 'tmdb' else "🔵 Local")
@@ -212,6 +291,26 @@ if mode == "離線評估":
     with st.spinner(f"⚙️ 執行 {method} 離線評估中…"):
         if method == "Baseline":
             result_df = recommend_baseline(candidates, top_k)
+            # --- 為 Baseline 計算指定的 5 個 SHAP 特徵 ---
+            try:
+                from shap_explainer import get_cached_explainer
+                explainer = get_cached_explainer(lgb_model, lgb_features)
+                X_explain = result_df[lgb_features]
+                shap_values = explainer.get_shap_values(X_explain)
+                
+                # 指定要顯示的 5 個特徵及其索引
+                target_features = ['mf_score', 'user_avg_rating', 'user_genre_avg_score', 'cooc_hit_count', 'user_genre_max_score']
+                feat_to_idx = {f: i for i, f in enumerate(lgb_features)}
+                
+                for feat in target_features:
+                    if feat in feat_to_idx:
+                        idx = feat_to_idx[feat]
+                        vals = shap_values[:, idx]
+                        result_df[f'SHAP_{feat}'] = [
+                            f"{v:+.4f}" for v in vals
+                        ]
+            except Exception as e:
+                st.error(f"SHAP 計算出錯: {e}")
         elif method == "MMR":
             result_df = recommend_mmr(candidates, top_k, lambda_val)
         elif method == "Pareto":
@@ -221,7 +320,13 @@ if mode == "離線評估":
     liked_ids = [mid for mid, r in actual.items() if r >= 3.0]
 
     st.subheader(f"📋 1. {method} 推薦結果 (Offline)")
-    st.dataframe(format_display(result_df, method, liked_ids=liked_ids), use_container_width=True)
+    st.dataframe(
+        format_display(result_df, method, liked_ids=liked_ids), 
+        use_container_width=True
+    )
+
+    # --- 刪除原本的 SHAP 詳細區塊 ---
+    pass
 
     st.markdown("---")
     st.subheader("📈 2. 離線效能指標 (Metrics)")
@@ -261,18 +366,22 @@ else:  # 互動式推薦
     with col_run:
         interactive_run = st.button("🚀 產生推薦", type="primary", use_container_width=True)
 
-    if interactive_run:
-        if not nlp_prompt:
-            st.warning("請輸入需求描述後再執行推薦。")
-            st.stop()
-            
-        candidates = get_candidates(user_id)
+    # 修改：只要 nlp_prompt 有內容且按下 Enter (Streamlit 預設行為) 或點擊按鈕，即執行推薦
+    if interactive_run or (nlp_prompt and nlp_prompt.strip()):
+        # 改為冷啟動候選池：不使用 user_id
+        candidates = get_cold_start_candidates()
+        
         # --- 執行互動式推薦 ---
         with st.spinner("🧠 語意解析與跨域推薦計算中…"):
             result_df, parsed = recommend_nlp_pareto(candidates, top_k, nlp_prompt, use_llm=use_llm, api_key=openai_api_key)
 
         # 1. 語意解析說明
         st.subheader("💡 1. 語意解析說明 (Explainability)")
+        
+        # 若為 Fallback 狀態，顯示警告
+        if not parsed.get("objectives"):
+            st.warning(parsed["explanation"])
+        
         p_type = parsed.get("_parser", "rule_based")
         st.success(f"✅ 解析完成 ({p_type.upper()})")
         
@@ -293,20 +402,42 @@ else:  # 互動式推薦
 
         st.markdown("---")
         
-        # 2. 精選推薦詳情 (Top 5 Featured) - 移到前面
+        # 2. 精選推薦詳情 (Top 5 Featured)
         st.subheader("🌟 2. 精選推薦詳情 (Top 5 Featured)")
         for idx, row in result_df.head(5).iterrows():
             with st.container():
+                # Step 7 & 8: 顯示圖片與簡介，移除 movie_id
                 col1, col2 = st.columns([1, 4])
-                poster_url = row.get('poster_path', "https://via.placeholder.com/150x225?text=No+Poster")
-                if pd.isna(poster_url): poster_url = "https://via.placeholder.com/150x225?text=No+Poster"
-                with col1: st.image(poster_url, use_container_width=True)
+                
+                # 取得圖片 URL (優先使用 merge 後的 poster_url)
+                poster_url = row.get('poster_url')
+                if pd.isna(poster_url) or not poster_url:
+                    # Fallback to TMDB API path if available (for newly fetched TMDB items)
+                    poster_url = row.get('poster_path', "https://via.placeholder.com/150x225?text=No+Poster")
+                
+                with col1:
+                    if pd.notnull(poster_url) and str(poster_url).startswith("http"):
+                        st.image(poster_url, use_container_width=True)
+                        st.caption("來源：TMDB")
+                    else:
+                        # 使用預設圖片 (Step 7)
+                        st.image("https://via.placeholder.com/150x225?text=MovieLens", use_container_width=True)
+                        st.caption("來源：MovieLens")
+                
                 with col2:
-                    st.markdown(f"### {idx+1}. {row['movie_title']}")
-                    st.markdown(f"**來源**: {'🟣 TMDB' if row.get('source') == 'tmdb' else '🔵 Local'} | **年份**: {row.get('release_year', 'Unknown')}")
+                    # Step 8: 完全不顯示 movie_id
+                    st.subheader(f"{row['movie_title']}")
+                    st.markdown(f"**年份**: {row.get('release_year', 'Unknown')}")
+                    
                     active_genres = [g for g in GENRE_COLS if row.get(g) == 1]
                     if active_genres: st.markdown(f"**類型**: {' · '.join(active_genres)}")
-                    st.write(row.get('overview', "尚無電影簡介資訊。"))
+                    
+                    # Step 7: 顯示簡介
+                    overview = row.get('overview')
+                    if pd.notnull(overview) and str(overview).strip() != "":
+                        st.write(overview)
+                    else:
+                        st.write("此電影來自 MovieLens 資料集，暫無詳細簡介。")
                     
                     # 顯示最終分數與特徵
                     s_cols = st.columns(4)

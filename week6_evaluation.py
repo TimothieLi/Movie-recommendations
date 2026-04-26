@@ -72,9 +72,10 @@ def evaluate_method(method_fn, user_candidates, genre_cols, ground_truth, user_i
 
 def run_week6_experiments(test_users, unseen_candidates, test_ground_truth, genre_cols, total_movies_count, pool_size=50, k=10, progress_callback=None):
     """
-    執行所有的推薦方法比較大迴圈，包含 LightGBM, MMR, Pareto, 與各種 Pareto+NLP
+    執行固定的離線推薦方法比較大迴圈，包含 LightGBM, MMR 與 Pareto。
+    (Pareto + NLP 為互動式機制，獨立於正式離線比較之外展示)
     """
-    # 定義要一起做 benchmarking 的設定檔
+    # 定義要一起做 benchmarking 的固定方法設定檔
     methods_config = [
         {"name": "LightGBM (Baseline)", "params": "N/A", "type": "baseline"},
         {"name": "MMR", "params": "λ=0.0", "type": "mmr", "lambda_val": 0.0},
@@ -82,11 +83,7 @@ def run_week6_experiments(test_users, unseen_candidates, test_ground_truth, genr
         {"name": "MMR", "params": "λ=0.5", "type": "mmr", "lambda_val": 0.5},
         {"name": "MMR", "params": "λ=0.75", "type": "mmr", "lambda_val": 0.75},
         {"name": "MMR", "params": "λ=1.0", "type": "mmr", "lambda_val": 1.0},
-        {"name": "Pareto Re-ranking (Soft)", "params": "soft+weighted", "type": "pareto_w4"},
-        {"name": "Pareto + NLP", "params": "Query: 冷門", "type": "nlp", "query": "冷門"},
-        {"name": "Pareto + NLP", "params": "Query: 多樣", "type": "nlp", "query": "多樣"},
-        {"name": "Pareto + NLP", "params": "Query: 新", "type": "nlp", "query": "新"},
-        {"name": "Pareto + NLP", "params": "Query: 冷門 + 多樣", "type": "nlp", "query": "冷門而且多樣"}
+        {"name": "Pareto Re-ranking (Soft)", "params": "soft+weighted", "type": "pareto_w4"}
     ]
     
     # 預先解析 NLP 參數

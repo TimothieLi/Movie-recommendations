@@ -4,7 +4,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 
 def pareto_rerank(user_candidates, k=10, pool_size=100, tie_break='weighted',
-                  relevance_weight=0.85, novelty_weight=0.15, epsilon=0.01,
+                  relevance_weight=0.85, novelty_weight=0.15, epsilon=0.1,
                   selection_mode='soft'):
     """
     Improved Pareto Dominance Re-ranking（雙階段設計 + Epsilon 支配 + Soft 模式）
@@ -51,40 +51,42 @@ def pareto_rerank(user_candidates, k=10, pool_size=100, tie_break='weighted',
     if df.empty:
         return df
 
-    # 確保 novelty_norm 存在
+    # 確保必要欄位存在與 fallback
     if 'novelty_norm' not in df.columns:
-        if 'novelty' in df.columns:
-            df['novelty_norm'] = df['novelty']
-        else:
-            df['novelty_norm'] = 0.5
+        df['novelty_norm'] = df['novelty'] if 'novelty' in df.columns else 0.5
+    if 'quality' not in df.columns:
+        df['quality'] = 0.5
+    if 'recency' not in df.columns:
+        df['recency'] = 0.5
 
-    # 2. Min-Max Normalization (確保 epsilon 與加權在同一量級)
+    # 2. Min-Max Normalization (確保四個維度在同一量級 [0, 1])
     scaler = MinMaxScaler()
     df['_norm_score'] = scaler.fit_transform(df[['predict_score']])
-    # novelty_norm 通常已在 0~1，此處亦可再次確認或直接使用
-    df['_norm_novelty'] = df['novelty_norm']
+    df['_norm_novelty'] = scaler.fit_transform(df[['novelty_norm']])
+    df['_norm_quality'] = scaler.fit_transform(df[['quality']])
+    df['_norm_recency'] = scaler.fit_transform(df[['recency']])
 
-    # 3. 計算 Pareto Layers (全池計算，為 soft 模式打底)
+    # 3. 多目標 Pareto 分層計算 (4-Objective: Score, Novelty, Quality, Recency)
     remaining_indices = list(df.index)
     df['pareto_layer'] = 0
     current_layer = 1
+    
+    # 定義要比較的維度
+    compare_cols = ['_norm_score', '_norm_novelty', '_norm_quality', '_norm_recency']
     
     while remaining_indices:
         layer_indices = []
         for i in remaining_indices:
             is_dominated = False
-            s_i = df.loc[i, '_norm_score']
-            n_i = df.loc[i, '_norm_novelty']
+            vals_i = df.loc[i, compare_cols].values
             
             for j in remaining_indices:
                 if i == j: continue
-                s_j = df.loc[j, '_norm_score']
-                n_j = df.loc[j, '_norm_novelty']
+                vals_j = df.loc[j, compare_cols].values
                 
-                # Dominance with Epsilon Margin:
-                # j 支配 i 的條件：j 在各項都不輸 i (允許可控誤差)，且至少有一項顯著勝過 i
-                if (s_j >= s_i - epsilon and n_j >= n_i - epsilon) and \
-                   (s_j > s_i + epsilon or n_j > n_i + epsilon):
+                # 多維 Epsilon Dominance:
+                # j 支配 i 的條件：j 在所有維度都不輸 i - eps，且至少有一項勝過 i + eps
+                if np.all(vals_j >= vals_i - epsilon) and np.any(vals_j > vals_i + epsilon):
                     is_dominated = True
                     break
             
@@ -96,42 +98,52 @@ def pareto_rerank(user_candidates, k=10, pool_size=100, tie_break='weighted',
             remaining_indices.remove(idx)
         current_layer += 1
 
+    # [Debug] 顯示原始池子分層分佈
+    print("\n--- [Debug] Full Pool Pareto Rank Distribution ---")
+    print(df["pareto_layer"].value_counts().sort_index())
+
     # 4. 執行篩選邏輯
     if selection_mode == 'soft':
-        # Soft Pareto: 結合層級權益與加權指標分數
-        # layer 1 獲得 1.0, layer 2 獲得 0.5 ... 以此類推，再疊加權重分數
+        # Soft Pareto: 結合層級權益與加權指標分數 (Tie-break 權重僅包含 score 與 novelty)
         df['_final_selection_score'] = (1.0 / df['pareto_layer']) + \
                                       (relevance_weight * df['_norm_score'] + 
                                        novelty_weight * df['_norm_novelty'])
         final_df = df.sort_values('_final_selection_score', ascending=False).head(k).copy()
     else:
-        # Hard Pareto: 傳統分層抓取，直到滿足 k 個
+        # Hard Pareto
         selected_indices = []
         l = 1
         while len(selected_indices) < k and l < current_layer:
-            layer_items = df[df['pareto_layer'] == l].index.tolist()
-            selected_indices.extend(layer_items)
+            layer_indices_in_l = df[df['pareto_layer'] == l].index.tolist()
+            selected_indices.extend(layer_indices_in_l)
             l += 1
         candidate_indices = selected_indices[:k]
         final_df = df.loc[candidate_indices].copy()
 
-    # 5. 第二階段：Tie-break Sorting (對已挑出的候選集進行最終排序)
+    # 5. 第二階段：Tie-break Sorting
     if tie_break == 'weighted':
         final_df['_tiebreak_score'] = (
             relevance_weight * final_df['_norm_score'] + 
             novelty_weight * final_df['_norm_novelty']
         )
-        final_df = final_df.sort_values('_tiebreak_score', ascending=False)
+        final_df = final_df.sort_values(['pareto_layer', '_tiebreak_score'], ascending=[True, False])
     else:
-        # 預設 'relevance': 即使經過 Pareto，最終仍以預測分數為準
-        final_df = final_df.sort_values('predict_score', ascending=False)
+        final_df = final_df.sort_values(['pareto_layer', 'predict_score'], ascending=[True, False])
 
     # 6. 整理輸出
     final_df = final_df.reset_index(drop=True)
-    final_df['pareto_rank'] = range(1, len(final_df) + 1)
+    final_df['pareto_rank'] = final_df['pareto_layer']
     
+    # [Debug] 輸出前 10 名的多維度狀態
+    print("\n--- [Debug] Pareto 4-Objective Top 10 Status ---")
+    print(final_df[[
+        "movie_title", "_norm_score", "_norm_novelty", 
+        "_norm_quality", "_norm_recency", "pareto_rank"
+    ]].head(10))
+
     # 移除內部運算暫存欄位
-    tmp_cols = ['_norm_score', '_norm_novelty', '_final_selection_score', '_tiebreak_score']
+    tmp_cols = ['_norm_score', '_norm_novelty', '_norm_quality', '_norm_recency', 
+                '_final_selection_score', '_tiebreak_score', 'pareto_layer']
     final_df.drop(columns=[c for c in tmp_cols if c in final_df.columns], inplace=True)
     
     return final_df
@@ -146,10 +158,6 @@ def mmr_rerank(user_candidates, genre_cols, lambda_val=0.5, k=10, pool_size=50):
     # 限制 Top N pool
     df = user_candidates.sort_values('predict_score', ascending=False).head(pool_size).copy().reset_index(drop=True)
     
-    # 計算 Relevance: Min-Max Normalization to [0, 1]
-    scaler = MinMaxScaler()
-    df['relevance'] = scaler.fit_transform(df[['predict_score']])
-    
     selected_indices = []
     unselected_indices = list(df.index)
     
@@ -159,9 +167,10 @@ def mmr_rerank(user_candidates, genre_cols, lambda_val=0.5, k=10, pool_size=50):
     while len(selected_indices) < k and unselected_indices:
         if len(selected_indices) == 0:
             # 挑第一部電影：完全看 Relevance，無 similarity 懲罰
-            best_idx = df.loc[unselected_indices, 'relevance'].idxmax()
+            best_idx = df.loc[unselected_indices, 'predict_score'].idxmax()
             best_sim = 0.0
-            best_mmr = df.loc[best_idx, 'relevance'] * lambda_val # 為了顯示統一
+            # 原始 MMR 公式：λ * predict_score - (1-λ) * max_sim (此處 max_sim=0)
+            best_mmr = df.loc[best_idx, 'predict_score'] * lambda_val 
         else:
             best_idx = None
             max_mmr = -np.inf
@@ -171,23 +180,21 @@ def mmr_rerank(user_candidates, genre_cols, lambda_val=0.5, k=10, pool_size=50):
             selected_profiles = df.loc[selected_indices, genre_cols].values
             
             for i in unselected_indices:
-                rel_i = df.loc[i, 'relevance']
+                score_i = df.loc[i, 'predict_score']
                 g_i = df.loc[i, genre_cols].values
                 
                 # 計算 Jaccard Similarity: intersection / union
-                # selected_profiles (len(S), num_genres), g_i (num_genres,)
                 intersections = np.sum(np.minimum(selected_profiles, g_i), axis=1)
                 unions = np.sum(np.maximum(selected_profiles, g_i), axis=1)
                 
-                # 避免分母為 0
                 jaccard_sims = np.zeros_like(unions, dtype=float)
                 nonzero_mask = unions > 0
                 jaccard_sims[nonzero_mask] = intersections[nonzero_mask] / unions[nonzero_mask]
                 
                 max_sim = np.max(jaccard_sims)
                 
-                # 計算 MMR 分數
-                mmr_score = lambda_val * rel_i - (1 - lambda_val) * max_sim
+                # 使用原始分數計算 MMR (不使用 normalized relevance)
+                mmr_score = lambda_val * score_i - (1 - lambda_val) * max_sim
                 
                 if mmr_score > max_mmr:
                     max_mmr = mmr_score

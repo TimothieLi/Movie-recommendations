@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from movie_lgb_recommender import run_recommender_pipeline
+from movie_lgb_recommender import run_recommender_pipeline, ndcg_at_k
+from optuna_tuning import run_optuna_weight_search
 from tmdb_api import TMDBClient
 import warnings
 
@@ -19,13 +20,12 @@ st.title("🎬 專題：電影推薦系統 (LightGBM)")
 
 # --- 1. 快取模型與預測結果 ---
 # 使用 st.cache_data 讓我們只在「初次打開網頁」時花時間訓練模型，之後都不會重跑
-@st.cache_data(show_spinner="模型訓練與特徵工程進行中，大約需要 5~10 秒，請稍後...")
+@st.cache_data(show_spinner="⏳ 載入資料中，請稍候...")
 def load_all_data_and_predict():
-    # 執行整個 offline batch pipeline
-    test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates = run_recommender_pipeline()
-    return list(test_users), top_10_df, test_ground_truth, movies_df, unseen_candidates
+    from movie_lgb_recommender import run_recommender_pipeline
+    return run_recommender_pipeline()
 
-test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates = load_all_data_and_predict()
+test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates, lgb_model, lgb_features = load_all_data_and_predict()
 
 # --- 2. 側邊欄 ---
 st.sidebar.header("🕹️ 控制面板")
@@ -178,10 +178,15 @@ elif page_selection == "🏆 Re-ranking 演算法 (Week 4)":
         st.subheader("2️⃣ Pareto Re-ranking Top-10")
         pareto_df = pareto_rerank(user_candidates, k=10,
                                    pool_size=100, tie_break='weighted',
+                                   epsilon=0.05,
                                    selection_mode='soft')
         pareto_display = pareto_df[['movie_title', 'predict_score', 'novelty_norm']].copy()
         pareto_display.index = range(1, len(pareto_display) + 1)
         st.dataframe(pareto_display, use_container_width=True)
+        
+        with st.expander("📊 Debug: Pareto Layer Distribution"):
+            layer_counts = pareto_df['pareto_rank'].value_counts().sort_index()
+            st.bar_chart(layer_counts)
         
     st.markdown("---")
     st.subheader("3️⃣ MMR (Maximal Marginal Relevance) Top-10")
@@ -216,91 +221,87 @@ elif page_selection == "🏆 Re-ranking 演算法 (Week 4)":
     st.write("""
     - Optuna 會在目前候選集上搜尋最佳權重。
     - 權重用於 **Pareto Rank** 內部的 tie-break（同層排序）。
-    - 搜尋目標：極大化 **NDCG@10**。
     """)
+    top_k_optuna = st.selectbox("Optuna 評估 Top-K", [10, 15, 20], index=0)
+    st.write(f"搜尋目標：極大化 **NDCG@{top_k_optuna}**")
 
     if st.button("Run Optuna Search", type="primary"):
+        print("[DEBUG] 'Run Optuna Search' button clicked.")
         try:
             import optuna
             from movie_lgb_recommender import ndcg_at_k
             
             # 準備搜尋用的資料
-            # 確保有必要欄位
             search_df = user_candidates.copy()
             if 'novelty_norm' not in search_df.columns:
                 search_df['novelty_norm'] = search_df['novelty'] if 'novelty' in search_df.columns else 0.5
             if 'quality' not in search_df.columns:
                 search_df['quality'] = search_df['predict_score'] # fallback
             
-            # 先計算 Pareto Rank (若尚未計算)
+            # Step 1: Pareto Ranking (初始化資料)
             if 'pareto_rank' not in search_df.columns:
-                search_df = pareto_rerank(search_df, k=len(search_df), pool_size=len(search_df))
+                candidate_pool_size = 100
+                st.caption(f"Candidate pool limited to top {candidate_pool_size} items by LightGBM score for faster Pareto computation.")
+                
+                pareto_progress_bar = st.progress(0.0)
+                pareto_status_text = st.empty()
+
+                def update_pareto_progress(val, message=""):
+                    pareto_progress_bar.progress(val)
+                    pareto_status_text.write(
+                        f"正在計算 Pareto Ranking... 已完成 {int(val * 100)}%"
+                        + (f"｜{message}" if message else "")
+                    )
+
+                update_pareto_progress(0.1, f"準備候選池：{candidate_pool_size} items")
+                
+                # 限制候選池大小以加速計算
+                search_df = search_df.sort_values("predict_score", ascending=False).head(candidate_pool_size).copy()
+                
+                update_pareto_progress(0.4, f"開始計算 Pareto Rank：{len(search_df)} items")
+                
+                with st.spinner("正在進行大規模 Pareto 分層計算..."):
+                    search_df = pareto_rerank(search_df, k=len(search_df), pool_size=len(search_df))
+                
+                update_pareto_progress(1.0, f"✅ Pareto Ranking 完成：{len(search_df)} items")
 
             actual_dict = test_ground_truth.get(selected_user_id, {})
             
-            def objective(trial):
-                w_relevance = trial.suggest_float("w_relevance", 0.0, 1.0)
-                w_novelty = trial.suggest_float("w_novelty", 0.0, 1.0)
-                w_quality = trial.suggest_float("w_quality", 0.0, 1.0)
-                
-                total = w_relevance + w_novelty + w_quality
-                if total == 0: return 0.0
-                
-                # 正規化
-                w_rel = w_relevance / total
-                w_nov = w_novelty / total
-                w_qua = w_quality / total
-                
-                # 計算 weighted tie-break score
-                search_df['weighted_score'] = (
-                    w_rel * search_df['predict_score'] + 
-                    w_nov * search_df['novelty_norm'] + 
-                    w_qua * search_df['quality']
+            # Step 2: Optuna Search
+            n_trials = 30
+            st.info(f"🔍 Step 2：Optuna 正在搜尋最佳權重，以 NDCG@{top_k_optuna} 為目標...")
+            print("[DEBUG] Starting Optuna study.optimize...")
+            with st.spinner(f"Optuna 正在進行權重優化 (共 {n_trials} trials)..."):
+                best_weights, best_score, final_result = run_optuna_weight_search(
+                    search_df=search_df,
+                    actual_dict=actual_dict,
+                    ndcg_func=ndcg_at_k,
+                    top_k=top_k_optuna,
+                    n_trials=n_trials
                 )
-                
-                # 排序：先 Pareto Rank (升序)，再 weighted_score (降序)
-                reranked = search_df.sort_values(
-                    ["pareto_rank", "weighted_score"], 
-                    ascending=[True, False]
-                ).head(10)
-                
-                preds = reranked['movie_id'].tolist()
-                score = ndcg_at_k(actual_dict, preds, k=10)
-                return score
-
-            with st.spinner("Optuna 正在尋找最佳權重組合 (30 trials)..."):
-                study = optuna.create_study(direction="maximize")
-                study.optimize(objective, n_trials=30)
             
-            st.success(f"✅ Optuna 搜尋完成！最佳驗證 NDCG@10: {study.best_value:.4f}")
+            st.success(f"✅ Optuna 搜尋完成！NDCG@{top_k_optuna}: {best_score * 100:.2f}%")
             
-            best_params = study.best_params
-            total_best = sum(best_params.values())
+            if best_score == 0.0:
+                st.warning("⚠️ 此使用者在 Top-K 推薦中沒有命中任何測試集喜好電影")
+                st.info("NDCG = 0%，因此權重結果不具參考意義，已隱藏權重顯示")
+                st.info("推薦結果已顯示，但排序效果無法被評估（NDCG=0）")
+            else:
+                col_w1, col_w2, col_w3 = st.columns(3)
+                col_w1.metric("Relevance Weight", f"{best_weights['relevance']:.2%}")
+                col_w2.metric("Novelty Weight", f"{best_weights['novelty']:.2%}")
+                col_w3.metric("Quality Weight", f"{best_weights['quality']:.2%}")
             
-            col_w1, col_w2, col_w3 = st.columns(3)
-            col_w1.metric("Relevance Weight", f"{best_params['w_relevance']/total_best:.2%}")
-            col_w2.metric("Novelty Weight", f"{best_params['w_novelty']/total_best:.2%}")
-            col_w3.metric("Quality Weight", f"{best_params['w_quality']/total_best:.2%}")
-            
-            # 套用最佳權重顯示結果
-            w_rel = best_params['w_relevance'] / total_best
-            w_nov = best_params['w_novelty'] / total_best
-            w_qua = best_params['w_quality'] / total_best
-            
-            search_df['weighted_score'] = (
-                w_rel * search_df['predict_score'] + 
-                w_nov * search_df['novelty_norm'] + 
-                w_qua * search_df['quality']
-            )
-            
-            final_result = search_df.sort_values(
-                ["pareto_rank", "weighted_score"], 
-                ascending=[True, False]
-            ).head(10)
-            
-            st.subheader("🏆 Best Weighted Tie-break Results")
+            st.subheader(f"🏆 Best Weighted Tie-break Results @ Top-{top_k_optuna}")
             display_cols = ['movie_title', 'pareto_rank', 'predict_score', 'novelty_norm', 'weighted_score']
             st.dataframe(final_result[display_cols].reset_index(drop=True), use_container_width=True)
+
+            # Debug: Pareto Layer Distribution
+            with st.expander("📊 Debug: Pareto Layer Distribution"):
+                layer_counts = final_result['pareto_rank'].value_counts().sort_index()
+                st.write("各層 (Pareto Rank) 包含的電影數量：")
+                st.bar_chart(layer_counts)
+                st.write(layer_counts)
 
         except ImportError:
             st.error("Optuna is not installed. Please run `pip install optuna` or install `requirements.txt`.")
@@ -453,7 +454,8 @@ elif page_selection == "📈 方法比較與分析 (Week 6)":
     # ==========================================
     st.markdown("### 📈 Week 6: 系統推薦方法全面比較")
     
-    st.write("在這裡我們將針對全體（或抽樣部分）的 Test Users，評估目前所有實作過的推薦系統演算法（LightGBM, MMR, Pareto, Pareto + NLP）在各項客觀基準的綜合表現。")
+    st.write("在這裡我們將針對全體（或抽樣部分）的 Test Users，評估固定離線推薦方法（LightGBM, MMR, Pareto）在各項客觀基準的綜合表現。")
+    st.info("💡 **提示**：Pareto + NLP 屬於互動式推薦機制，會根據使用者查詢動態調整目標，因此獨立於正式離線比較之外展示。")
     
     sample_size = st.slider("選擇要進行評測的 Test User 樣本數量 (數量越大，結果越精準但運算時間較長)", min_value=10, max_value=len(test_users), value=30, step=10)
     
@@ -533,8 +535,8 @@ elif page_selection == "📈 方法比較與分析 (Week 6)":
         st.pyplot(fig)
         
         st.markdown("---")
-        st.markdown(f"#### 🔍 Sanity Check: 單一用戶直觀比對 (User **{selected_user_id}**)")
-        st.write("以下為系統挑出部分極端條件下的 Top-5 呈現差異（避免紙上談兵，直接透過實體清單觀察特徵改變）：")
+        st.markdown(f"#### 🧬 NLP-driven Recommendation Case Study (User **{selected_user_id}**)")
+        st.write("此區塊展示互動式推薦機制與傳統固定演算法的行為差異。您可以觀察 NLP 指令如何即時改變推薦風格：")
         
         from week4_reranking import mmr_rerank, pareto_rerank
         from week5_nlp_pareto import dynamic_pareto_rerank, parse_query
