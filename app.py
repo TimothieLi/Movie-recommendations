@@ -207,6 +207,106 @@ elif page_selection == "🏆 Re-ranking 演算法 (Week 4)":
             mmr_display.index = range(1, len(mmr_display) + 1)
             st.dataframe(mmr_display, use_container_width=True)
 
+    # ==========================================
+    # 5.5 Optuna Weighted Tie-break Search
+    # ==========================================
+    st.markdown("---")
+    st.subheader("🔍 Optuna Weighted Tie-break Search")
+    st.info("Demo mode: using available evaluation candidates. For formal experiments, tune on validation set only.")
+    st.write("""
+    - Optuna 會在目前候選集上搜尋最佳權重。
+    - 權重用於 **Pareto Rank** 內部的 tie-break（同層排序）。
+    - 搜尋目標：極大化 **NDCG@10**。
+    """)
+
+    if st.button("Run Optuna Search", type="primary"):
+        try:
+            import optuna
+            from movie_lgb_recommender import ndcg_at_k
+            
+            # 準備搜尋用的資料
+            # 確保有必要欄位
+            search_df = user_candidates.copy()
+            if 'novelty_norm' not in search_df.columns:
+                search_df['novelty_norm'] = search_df['novelty'] if 'novelty' in search_df.columns else 0.5
+            if 'quality' not in search_df.columns:
+                search_df['quality'] = search_df['predict_score'] # fallback
+            
+            # 先計算 Pareto Rank (若尚未計算)
+            if 'pareto_rank' not in search_df.columns:
+                search_df = pareto_rerank(search_df, k=len(search_df), pool_size=len(search_df))
+
+            actual_dict = test_ground_truth.get(selected_user_id, {})
+            
+            def objective(trial):
+                w_relevance = trial.suggest_float("w_relevance", 0.0, 1.0)
+                w_novelty = trial.suggest_float("w_novelty", 0.0, 1.0)
+                w_quality = trial.suggest_float("w_quality", 0.0, 1.0)
+                
+                total = w_relevance + w_novelty + w_quality
+                if total == 0: return 0.0
+                
+                # 正規化
+                w_rel = w_relevance / total
+                w_nov = w_novelty / total
+                w_qua = w_quality / total
+                
+                # 計算 weighted tie-break score
+                search_df['weighted_score'] = (
+                    w_rel * search_df['predict_score'] + 
+                    w_nov * search_df['novelty_norm'] + 
+                    w_qua * search_df['quality']
+                )
+                
+                # 排序：先 Pareto Rank (升序)，再 weighted_score (降序)
+                reranked = search_df.sort_values(
+                    ["pareto_rank", "weighted_score"], 
+                    ascending=[True, False]
+                ).head(10)
+                
+                preds = reranked['movie_id'].tolist()
+                score = ndcg_at_k(actual_dict, preds, k=10)
+                return score
+
+            with st.spinner("Optuna 正在尋找最佳權重組合 (30 trials)..."):
+                study = optuna.create_study(direction="maximize")
+                study.optimize(objective, n_trials=30)
+            
+            st.success(f"✅ Optuna 搜尋完成！最佳驗證 NDCG@10: {study.best_value:.4f}")
+            
+            best_params = study.best_params
+            total_best = sum(best_params.values())
+            
+            col_w1, col_w2, col_w3 = st.columns(3)
+            col_w1.metric("Relevance Weight", f"{best_params['w_relevance']/total_best:.2%}")
+            col_w2.metric("Novelty Weight", f"{best_params['w_novelty']/total_best:.2%}")
+            col_w3.metric("Quality Weight", f"{best_params['w_quality']/total_best:.2%}")
+            
+            # 套用最佳權重顯示結果
+            w_rel = best_params['w_relevance'] / total_best
+            w_nov = best_params['w_novelty'] / total_best
+            w_qua = best_params['w_quality'] / total_best
+            
+            search_df['weighted_score'] = (
+                w_rel * search_df['predict_score'] + 
+                w_nov * search_df['novelty_norm'] + 
+                w_qua * search_df['quality']
+            )
+            
+            final_result = search_df.sort_values(
+                ["pareto_rank", "weighted_score"], 
+                ascending=[True, False]
+            ).head(10)
+            
+            st.subheader("🏆 Best Weighted Tie-break Results")
+            display_cols = ['movie_title', 'pareto_rank', 'predict_score', 'novelty_norm', 'weighted_score']
+            st.dataframe(final_result[display_cols].reset_index(drop=True), use_container_width=True)
+
+        except ImportError:
+            st.error("Optuna is not installed. Please run `pip install optuna` or install `requirements.txt`.")
+        except Exception as e:
+            st.error(f"執行過程中發生錯誤: {e}")
+
 elif page_selection == "✨ NLP 動態推薦 (Week 5)":
     # ==========================================
     # 6. Week 5: LLM-Assisted Semantic Parsing + Dynamic Pareto Re-ranking

@@ -225,6 +225,7 @@ if mode == "離線評估":
 
     st.markdown("---")
     st.subheader("📈 2. 離線效能指標 (Metrics)")
+    st.caption(f"Evaluation Metrics @ Top-{top_k}")
     preds = result_df['movie_id'].tolist()
     m_ndcg = ndcg_at_k(actual, preds, k=top_k)
     m_recall = recall_at_k(actual, preds, k=top_k, threshold=3.0)
@@ -232,7 +233,7 @@ if mode == "離線評估":
     m_ild = calculate_ild_at_k(result_df, GENRE_COLS)
 
     metrics_data = {
-        "指標項目": ["NDCG@K", "Recall@K", "Avg Novelty", "ILD (Diversity)"],
+        "指標項目": [f"NDCG@{top_k}", f"Recall@{top_k}", f"Novelty@{top_k}", f"ILD@{top_k}"],
         "數值": [f"{m_ndcg*100:.2f}%", f"{m_recall*100:.2f}%", f"{m_novelty*100:.2f}%", f"{m_ild*100:.2f}%"],
         "說明": ["排序準確度", "喜好命中率", "驚喜度/冷門度", "類型多樣性"]
     }
