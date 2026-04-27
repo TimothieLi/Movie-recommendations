@@ -6,8 +6,6 @@
 ![LightGBM](https://img.shields.io/badge/model-LightGBM%20LambdaRank-orange)
 ![Streamlit](https://img.shields.io/badge/demo-Streamlit-red)
  
-🌐 **線上展示**: [movie-recommendations-timothie.streamlit.app](https://movie-recommendations-timothie.streamlit.app)
-
 > **推薦系統能否同時兼顧準確性與多樣性？使用者是否能用簡單的語言決定兩者之間的權衡？**
 > 本專案結合了 LightGBM LambdaRank 基準模型、基於 Pareto 的重新排序策略以及基於規則的 NLP 條件映射器，並在 MovieLens 100K 數據集上進行了嚴謹的訓練、驗證與測試集切分評估。
 
@@ -85,15 +83,9 @@
 
 | 評測方法 | Recall@10 | NDCG@10 | Novelty@10 | ILD@10 (多樣性) |
 | :--- | :---: | :---: | :---: | :---: |
-| **基準模型 (LGB + MF)** | **2.90%** | **0.1359** | 0.2889 | 0.7457 |
-| **MMR (λ=0.25)** | - | 0.1290 | 0.3143 | 0.9131 |
-| **MMR (λ=0.5)** | - | 0.1387 | 0.2984 | 0.8798 |
-| **MMR (λ=0.75)** | - | 0.1384 | 0.2869 | 0.8058 |
-| **Pareto 重新排序 (Soft)** ✅ | 2.73% | 0.1222 | 0.3507 | 0.7463 |
-| **NLP + Pareto (查詢: 冷門)** | - | 0.0849 | **0.3754** | 0.7495 |
-| **NLP + Pareto (查詢: 多樣)** | - | 0.1307 | 0.3155 | **0.9156** |
-| **NLP + Pareto (查詢: 新)** | - | **0.1817** | 0.3115 | 0.7484 |
-| **NLP + Pareto (查詢: 冷門+多樣)** | - | 0.1359 | 0.2889 | 0.7457 |
+| **基準模型 (LGB + MF)** | 3.32% | 0.1312 | 0.2546 | 0.8536 |
+| **MMR (λ=0.5)** | 3.84% | 0.1995 | 0.2748 | 0.9107 |
+| **Pareto (Optuna最佳解)** ✅ | 2.63% | 0.1885 | **0.3112** | 0.7406 |
 
 
 *(Recall@10 僅在 Baseline 全測試集上計算；重新排序方法以相同候選池評估 NDCG/Novelty/ILD。Pareto 方法採 pool_size=100；數據來自測試集, seed=42, k=10)*

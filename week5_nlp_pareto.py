@@ -4,6 +4,14 @@ from sklearn.preprocessing import MinMaxScaler
 import re
 import json
 
+# --- Pyparsing 相容性補丁 ---
+try:
+    import pyparsing
+    if not hasattr(pyparsing, 'DelimitedList'):
+        pyparsing.DelimitedList = pyparsing.delimitedList
+except ImportError:
+    pass
+
 
 # ══════════════════════════════════════════════════════════════════════
 # Structured Query Schema（結構化查詢格式）
@@ -191,42 +199,18 @@ def parse_query_rule(query: str) -> dict:
 
 def parse_query_llm(query: str, api_key: str | None = None) -> dict:
     """
-    LLM-Assisted Semantic Parser
-
-    ════════════════════════════════════════════════════════════
-    設計精神：「LLM 只負責理解語意、輸出結構化條件；
-              後端 ranking 仍為 rule-based，保持可解釋性。」
-
-    運作流程：
-      1. 將 query + 格式說明組成 prompt
-      2. 呼叫 OpenAI Chat API（需傳入 api_key）
-      3. 解析回傳的 JSON → 符合 Structured Query Schema
-      4. 若 API 失敗或 JSON 格式錯誤 → fallback 到 parse_query_rule()
-
-    若未提供 api_key，本函式會直接 fallback 到 parse_query_rule()。
-    ════════════════════════════════════════════════════════════
-
-    Parameters
-    ----------
-    query : str
-        使用者自然語言輸入。
-    api_key : str or None
-        OpenAI API Key。為 None 時自動 fallback 到規則式解析。
-
-    Returns
-    -------
-    dict
-        結構化查詢結果（符合 Structured Query Schema）。
+    LLM-Assisted Semantic Parser (支援 OpenAI 與 Google Gemini)
     """
-    # ── Fallback：無 API Key 時使用規則式解析 ────────────────────────
     if not api_key:
         result = parse_query_rule(query)
         result["_parser"] = "rule_based"
         return result
 
-    # ── LLM Prompt ────────────────────────────────────────────────────
+    # 判斷 Provider
+    is_gemini = api_key.startswith("AIza")
+    
     system_prompt = """You are a semantic parser for a movie recommendation system.
-Given a user's natural language query (in Chinese or English), extract their movie preferences as a structured JSON object.
+Given a user's natural language query, extract their movie preferences as a structured JSON object.
 
 Output ONLY valid JSON with this exact schema:
 {
@@ -250,40 +234,60 @@ Output ONLY valid JSON with this exact schema:
 Rules:
 - relevance default is 0.85 unless user explicitly wants to ignore personal taste
 - Use 0.9 for "very", 0.7 for normal, 0.45 for "slightly"
-- Negation (e.g. "不要太主流" = not too mainstream) → increase novelty
-- If user says "good quality" or "well-rated" → set min_quality to 0.4"""
+- Negation (e.g. "不要太主流") -> increase novelty
+- If user says "good quality" -> set min_quality to 0.4"""
 
     user_prompt = f"Query: {query}"
 
     try:
-        import openai
-        client = openai.OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            temperature=0.0,
-            max_tokens=512,
-        )
-        raw = response.choices[0].message.content.strip()
-        # 去除可能的 markdown code fence
-        raw = re.sub(r"^```(?:json)?\n?", "", raw)
-        raw = re.sub(r"\n?```$", "", raw)
+        if is_gemini:
+            # --- Google Gemini REST API 邏輯 (指定您帳號中可用的型號) ---
+            import requests
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            headers = {'Content-Type': 'application/json'}
+            payload = {
+                "contents": [{
+                    "parts": [{"text": f"{system_prompt}\n\n{user_prompt}"}]
+                }],
+                "generationConfig": {
+                    "temperature": 0.0
+                }
+            }
+            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            res_json = response.json()
+            
+            if "candidates" in res_json:
+                raw = res_json['candidates'][0]['content']['parts'][0]['text']
+            else:
+                raise Exception(f"API Error: {res_json.get('error', {}).get('message', 'Unknown Error')}")
+        else:
+            # --- OpenAI 邏輯 ---
+            import openai
+            client = openai.OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_prompt},
+                ],
+                temperature=0.0,
+            )
+            raw = response.choices[0].message.content.strip()
+
+        # 解析 JSON
+        raw = re.sub(r"^```(?:json)?\n?", "", raw, flags=re.MULTILINE)
+        raw = re.sub(r"\n?```$", "", raw, flags=re.MULTILINE)
         parsed = json.loads(raw)
 
-        # 確保必要欄位存在
         result = _default_parsed_result()
         result["weights"].update(parsed.get("weights", {}))
         result["constraints"].update(parsed.get("constraints", {}))
         result["objectives"]  = parsed.get("objectives", [])
         result["explanation"] = parsed.get("explanation", "")
-        result["_parser"]     = "llm"
+        result["_parser"]     = f"llm ({'Gemini' if is_gemini else 'OpenAI'})"
         return result
 
     except Exception as e:
-        # ── Fallback：LLM 失敗時使用規則式解析 ──────────────────────
         result = parse_query_rule(query)
         result["_parser"]       = "rule_based_fallback"
         result["_llm_error"]    = str(e)

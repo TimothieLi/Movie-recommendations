@@ -1,8 +1,18 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
-import streamlit as st
 import os
+import re
 import warnings
+
+# --- Pyparsing 相容性補丁 (解決 Gemini API 報錯) ---
+try:
+    import pyparsing
+    if not hasattr(pyparsing, 'DelimitedList'):
+        pyparsing.DelimitedList = pyparsing.delimitedList
+except ImportError:
+    pass
+
 from movie_lgb_recommender import run_recommender_pipeline, ndcg_at_k, recall_at_k, GENRE_COLS
 from tmdb_api import TMDBClient
 from week6_evaluation import calculate_ild_at_k, calculate_novelty_at_k
@@ -89,7 +99,7 @@ with st.sidebar:
         tmdb_api_key = get_secret("TMDB_API_KEY")
         nlp_prompt_sidebar = ""
         use_llm = False
-        openai_api_key = get_secret("OPENAI_API_KEY")
+        api_key = get_secret("OPENAI_API_KEY") or get_secret("GEMINI_API_KEY")
         
         # 監控主要參數（不包含 Lambda，以達成拉動滑桿即時更新的效果）
         current_params = (user_id, method, top_k)
@@ -112,8 +122,16 @@ with st.sidebar:
     else:  # 互動式推薦
         st.header("⚙️ 推薦設定")
         with st.expander("🤖 LLM 解析設定"):
-            use_llm = st.checkbox("啟用 LLM 語意解析", value=True if get_secret("OPENAI_API_KEY") else False)
-            openai_api_key = st.text_input("OpenAI API Key", value=get_secret("OPENAI_API_KEY", ""), type="password")
+            # 優先從 Secrets 讀取，若無則留空
+            default_key = get_secret("OPENAI_API_KEY") or get_secret("GEMINI_API_KEY") or ""
+            use_llm = st.checkbox("啟用 LLM 語意解析", value=True if default_key else False)
+            api_key = st.text_input("LLM API Key (OpenAI / Gemini)", value=default_key, type="password", help="支援 OpenAI (sk-...) 或 Google Gemini (AIza...)")
+            
+            if api_key:
+                if api_key.startswith("AIza"):
+                    st.info("✨ 已偵測到 Google Gemini Key")
+                elif api_key.startswith("sk-"):
+                    st.info("🌌 已偵測到 OpenAI Key")
             
         with st.expander("🌐 外部資料整合"):
             tmdb_api_key = st.text_input("TMDB API Key", value=get_secret("TMDB_API_KEY", ""), type="password", help="輸入 API Key 啟用 TMDB 推薦")
@@ -136,6 +154,26 @@ GENRE_COLS = [
     "Film-Noir", "Horror", "Musical", "Mystery", "Romance", "Sci-Fi",
     "Thriller", "War", "Western"
 ]
+
+@st.cache_data(show_spinner=False)
+def get_movie_details_from_tmdb(title, api_key):
+    """透過電影名稱去 TMDB 抓取海報與簡介"""
+    if not api_key: return None, None
+    try:
+        # 去除標題中的年份括號，例如 "Toy Story (1995)" -> "Toy Story"
+        clean_title = title.split(' (')[0]
+        client = TMDBClient(api_key)
+        # 使用 search 功能
+        search_url = f"https://api.themoviedb.org/3/search/movie?api_key={api_key}&query={clean_title}"
+        import requests
+        resp = requests.get(search_url).json()
+        if resp.get('results'):
+            first = resp['results'][0]
+            poster = f"https://image.tmdb.org/t/p/w500{first['poster_path']}" if first.get('poster_path') else None
+            return poster, first.get('overview')
+    except:
+        pass
+    return None, None
 
 def get_candidates(user_id):
     """取得該 User 的候選清單，並補上 novelty_norm fallback"""
@@ -451,7 +489,7 @@ else:  # 互動式推薦
         
         # --- 執行互動式推薦 ---
         with st.spinner("🧠 語意解析與跨域推薦計算中…"):
-            result_df, parsed = recommend_nlp_pareto(candidates, top_k, nlp_prompt, use_llm=use_llm, api_key=openai_api_key)
+            result_df, parsed = recommend_nlp_pareto(candidates, top_k, nlp_prompt, use_llm=use_llm, api_key=api_key)
 
         # 1. 語意解析說明
         st.subheader("💡 1. 語意解析說明 (Explainability)")
@@ -463,7 +501,10 @@ else:  # 互動式推薦
         p_type = parsed.get("_parser", "rule_based")
         st.success(f"✅ 解析完成 ({p_type.upper()})")
         
-        # 顯示目標維度權重 (正規化至 100% 顯示)
+        # --- 新增：顯示詳細報錯訊息 (僅在 Fallback 時) ---
+        if p_type == "rule_based_fallback" and "_llm_error" in parsed:
+            with st.expander("❌ 查看 LLM 報錯細節"):
+                st.code(parsed["_llm_error"])
         weights = parsed.get("weights", {})
         if weights:
             st.markdown("**🎯 目標維度佔比 (Relative Importance)**")
@@ -487,37 +528,39 @@ else:  # 互動式推薦
                 # Step 7 & 8: 顯示圖片與簡介，移除 movie_id
                 col1, col2 = st.columns([1, 4])
                 
-                # 取得圖片 URL (優先使用 merge 後的 poster_url)
+                # 取得圖片與簡介
                 poster_url = row.get('poster_url')
+                description = row.get('overview') 
+                
+                # --- 新增：針對 Local 電影自動從 TMDB 補完海報與簡介 ---
+                if (pd.isna(poster_url) or not poster_url) and tmdb_api_key:
+                    p, d = get_movie_details_from_tmdb(row['movie_title'], tmdb_api_key)
+                    if p: poster_url = p
+                    if d: description = d
+                
+                # Fallback 處理
                 if pd.isna(poster_url) or not poster_url:
-                    # Fallback to TMDB API path if available (for newly fetched TMDB items)
-                    poster_url = row.get('poster_path', "https://via.placeholder.com/150x225?text=No+Poster")
+                    poster_url = row.get('poster_path', "https://via.placeholder.com/150x225?text=MovieLens")
                 
                 with col1:
                     if pd.notnull(poster_url) and str(poster_url).startswith("http"):
-                        st.image(poster_url)
+                        st.image(poster_url, use_column_width=True)
                         st.caption("來源：TMDB")
                     else:
-                        # 使用預設圖片 (Step 7)
-                        st.image("https://via.placeholder.com/150x225?text=MovieLens")
-                        st.caption("來源：MovieLens")
+                        st.image("https://via.placeholder.com/150x225?text=MovieLens", use_column_width=True)
                 
                 with col2:
-                    # Step 8: 完全不顯示 movie_id
                     st.subheader(f"{row['movie_title']}")
                     st.markdown(f"**年份**: {row.get('release_year', 'Unknown')}")
                     
                     active_genres = [g for g in GENRE_COLS if row.get(g) == 1]
                     if active_genres: st.markdown(f"**類型**: {' · '.join(active_genres)}")
                     
-                    # Step 7: 顯示簡介
-                    overview = row.get('overview')
-                    if pd.notnull(overview) and str(overview).strip() != "":
-                        st.write(overview)
+                    if description and pd.notnull(description):
+                        st.write(description)
                     else:
-                        st.write("此電影來自 MovieLens 資料集，暫無詳細簡介。")
+                        st.write("此電影來自 MovieLens 資料集，正在尋找詳細簡介...")
                     
-                    # 顯示最終分數與特徵
                     s_cols = st.columns(4)
                     s_cols[0].caption(f"🏆 Final Score: {row.get('final_score', 0):.4f}")
                     s_cols[1].caption(f"🔍 Novelty: {row.get('novelty', 0):.2f}")
