@@ -140,6 +140,8 @@
 │── week4_reranking.py        # 重新排序策略實作 (MMR, Pareto)
 │── week5_nlp_pareto.py       # Rule-based NLP 動態權重映射
 │── week6_evaluation.py       # 系統層級綜合評估與 Trade-off 視覺化
+│── tmdb_api.py               # TMDB API 整合與跨域資料抓取
+│── optuna_tuning.py          # 基於 Optuna 的多目標權重自動優化
 └── README.md                 # 專題文件 (本檔案)
 ```
 

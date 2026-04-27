@@ -1,17 +1,24 @@
-"""
-demo_app.py — Movie Recommendation System Demo Dashboard
-用途：專題展示用，可互動選擇使用者、推薦方法、NLP Prompt 即時看結果。
-啟動：python -m streamlit run demo_app.py
-"""
-
-import streamlit as st
 import pandas as pd
 import numpy as np
+import streamlit as st
 import os
 import warnings
+from movie_lgb_recommender import run_recommender_pipeline, ndcg_at_k, recall_at_k, GENRE_COLS
 from tmdb_api import TMDBClient
 from week6_evaluation import calculate_ild_at_k, calculate_novelty_at_k
-from movie_lgb_recommender import ndcg_at_k, recall_at_k
+
+warnings.filterwarnings("ignore")
+
+# --- 引入 Optuna 工具 ---
+try:
+    from optuna_tuning import run_optuna_weight_search
+except ImportError as e:
+    if "optuna" in str(e):
+        st.error("⚠️ 缺少 `optuna` 套件，請執行 `pip install optuna`。")
+    else:
+        st.error(f"⚠️ 無法載入 optuna_tuning.py: {e}")
+except Exception as e:
+    st.error(f"⚠️ 載入 Optuna 模組時出錯: {e}")
 warnings.filterwarnings("ignore")
  
 # ─────────────────────────────────────────────
@@ -39,20 +46,14 @@ st.markdown("---")
 # ─────────────────────────────────────────────
 # 1. 載入模型與資料（快取，只跑一次）
 # ─────────────────────────────────────────────
-@st.cache_data(show_spinner="⏳ 模型訓練與特徵工程中，請稍候…")
+@st.cache_resource(show_spinner="⏳ 模型訓練與特徵工程中，請稍候…")
 def load_pipeline():
     from movie_lgb_recommender import run_recommender_pipeline
-    # 現在 return 7 個值：test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates, model, features_to_use
+    # 回傳 7 個值：test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates, model, features_to_use
     res = run_recommender_pipeline()
-    test_users, top_10_df, test_ground_truth, _, unseen_candidates, model, features_to_use = res
-    
-    # Step 6: 使用整合了 TMDB Metadata 的新資料
-    if os.path.exists("movies_with_metadata.csv"):
-        movies_df = pd.read_csv("movies_with_metadata.csv")
-    else:
-        movies_df = res[3]
-        
-    return sorted([int(u) for u in test_users]), top_10_df, test_ground_truth, movies_df, unseen_candidates, model, features_to_use
+    # 確保 test_users 是經過排序的整數列表，方便選單操作
+    test_users_sorted = sorted([int(u) for u in res[0]])
+    return (test_users_sorted,) + res[1:]
 
 test_users, top_10_df, test_ground_truth, movies_df, unseen_candidates, lgb_model, lgb_features = load_pipeline()
 
@@ -64,10 +65,10 @@ if 'system_mode' not in st.session_state:
 
 with st.sidebar:
     st.header("🎮 系統模式選擇")
-    if st.button("📊 離線評估", use_container_width=True, type="primary" if st.session_state['system_mode'] == '離線評估' else "secondary"):
+    if st.button("📊 離線評估", type="primary" if st.session_state['system_mode'] == '離線評估' else "secondary"):
         st.session_state['system_mode'] = '離線評估'
         st.rerun()
-    if st.button("💬 互動式推薦", use_container_width=True, type="primary" if st.session_state['system_mode'] == '互動式推薦' else "secondary"):
+    if st.button("💬 互動式推薦", type="primary" if st.session_state['system_mode'] == '互動式推薦' else "secondary"):
         st.session_state['system_mode'] = '互動式推薦'
         st.rerun()
     
@@ -89,7 +90,24 @@ with st.sidebar:
         nlp_prompt_sidebar = ""
         use_llm = False
         openai_api_key = get_secret("OPENAI_API_KEY")
-        run_btn = st.button("🚀 產生推薦", type="primary", use_container_width=True)
+        
+        # 監控主要參數（不包含 Lambda，以達成拉動滑桿即時更新的效果）
+        current_params = (user_id, method, top_k)
+        
+        if 'run_offline' not in st.session_state:
+            st.session_state['run_offline'] = False
+        if 'prev_params' not in st.session_state:
+            st.session_state['prev_params'] = current_params
+            
+        # 僅在使用者、方法或數量改變時重設狀態
+        if st.session_state['prev_params'] != current_params:
+            st.session_state['run_offline'] = False
+            st.session_state['prev_params'] = current_params
+
+        if st.button("🚀 產生推薦", type="primary"):
+            st.session_state['run_offline'] = True
+        
+        run_btn = st.session_state['run_offline']
         
     else:  # 互動式推薦
         st.header("⚙️ 推薦設定")
@@ -124,12 +142,16 @@ def get_candidates(user_id):
     df = unseen_candidates[unseen_candidates['user_id'] == user_id].copy()
     df['source'] = 'movielens'
     
-    if tmdb_api_key:
+    # 僅在「互動式推薦」模式下且有 API Key 時才抓取 TMDB
+    if st.session_state.get('system_mode') == "互動式推薦" and tmdb_api_key:
         with st.spinner("🌐 正在獲取 TMDB 新電影..."):
-            client = TMDBClient(tmdb_api_key)
-            tmdb_df = client.get_candidates(user_id, count=50, genre_cols=GENRE_COLS)
-            if not tmdb_df.empty:
-                df = pd.concat([df, tmdb_df], ignore_index=True)
+            try:
+                client = TMDBClient(tmdb_api_key)
+                tmdb_df = client.get_candidates(user_id, count=50, genre_cols=GENRE_COLS)
+                if not tmdb_df.empty:
+                    df = pd.concat([df, tmdb_df], ignore_index=True)
+            except Exception as e:
+                st.warning(f"TMDB 獲取失敗: {e}")
                 
     if 'novelty_norm' not in df.columns:
         df['novelty_norm'] = df['novelty'] if 'novelty' in df.columns else 0.5
@@ -145,6 +167,18 @@ def recommend_mmr(candidates, k, lv):
 def recommend_pareto(candidates, k):
     from week4_reranking import pareto_rerank
     return pareto_rerank(candidates, k=k)
+
+# ── 修復：將快取函數移至全域範圍，避免定義在 loop 中導致當機 ────────────────
+@st.cache_data(show_spinner=False)
+def get_base_pareto_layers(_df):
+    """快取基礎分層結果，避免 Optuna 搜尋時重複執行昂貴的 Pareto 計算"""
+    _df = _df.copy()
+    if 'quality' not in _df.columns: _df['quality'] = _df['predict_score']
+    if 'novelty_norm' not in _df.columns: _df['novelty_norm'] = 0.5
+    # 這裡呼叫原始的 recommend_pareto 來取得所有分層
+    from week4_reranking import pareto_rerank
+    return pareto_rerank(_df, k=len(_df))
+# ────────────────────────────────────────────────────────────────────────
 
 def get_cold_start_candidates():
     """取得全體電影作為冷啟動候選池"""
@@ -223,50 +257,41 @@ def format_display(df, method_name, liked_ids=None):
         optional_cols = {}
         method_cols = {'similarity_penalty': 'Sim Penalty', 'mmr_score': 'MMR Score'}
     elif method_name == "Pareto":
-        # Pareto 顯示 Recency, Quality, Novelty 並加回 Pareto Rank
+        # Pareto 顯示 Recency, Quality, Novelty 並加回 Pareto Rank 與 Weighted Score
         # 根據要求移除 Source
         optional_cols = {'recency': 'Recency', 'quality': 'Quality', 'novelty': 'Novelty'}
-        method_cols = {'pareto_rank': 'Pareto Rank'}
+        method_cols = {'pareto_rank': 'Pareto Rank', 'weighted_score': 'Weighted Score'}
     elif method_name == "Pareto + NLP":
         # 互動模式移除內部過程欄位，顯示最終分數
         optional_cols.update({'recency': 'Recency', 'quality': 'Quality'})
         method_cols = {'final_score': 'Final Score'}
     elif method_name == "Baseline":
-        # Baseline 簡化欄位，並將指定的 5 個 SHAP 特徵顯示為獨立欄位
         optional_cols = {}
         # 指定要顯示 SHAP 的 5 個特徵
         shap_feat_cols = ['mf_score', 'user_avg_rating', 'user_genre_avg_score', 'cooc_hit_count', 'user_genre_max_score']
         for col in shap_feat_cols:
             if f'SHAP_{col}' in df.columns:
                 method_cols[f'SHAP_{col}'] = col
-        
-        # 最後加上預測分數
-        all_wanted = {}
-        all_wanted['movie_title'] = 'Movie Title'
-        for k, v in method_cols.items(): all_wanted[k] = v
-        all_wanted['predict_score'] = 'Preference (LGB)'
-        
-        existing = {k: v for k, v in all_wanted.items() if k in df.columns}
-        display = df[list(existing.keys())].copy().rename(columns=existing)
-        display.index = range(1, len(display) + 1)
-        display.index.name = "Rank"
-        return display.round(4)
-    else:
-        # 其他情況顯示完整資訊
-        optional_cols.update({'recency': 'Recency', 'quality': 'Quality'})
-
+    
     all_wanted = {**base_cols, **optional_cols, **method_cols}
     
-    # 針對 Baseline 以外的方法重新構建順序
-    if method_name != "Baseline":
-        all_wanted = {}
-        all_wanted['movie_title'] = 'Movie Title'
-        if method_name != "Pareto + NLP":
-            all_wanted['predict_score'] = 'Preference (LGB)'
-        for k, v in optional_cols.items(): all_wanted[k] = v
-        for k, v in method_cols.items(): all_wanted[k] = v
+    # 構建最終顯示字典
+    all_final = {}
+    all_final['movie_title'] = 'Movie Title'
+    
+    # 情況 A: 非 Baseline 且非互動模式，LGB 分數維持在前面 (第二欄)
+    if method_name != "Baseline" and method_name != "Pareto + NLP" and 'predict_score' in df.columns:
+        all_final['predict_score'] = 'Preference (LGB)'
+    
+    # 加入中間欄位 (Source, Novelty, Recency, Quality, Pareto Rank, MMR Score 等)
+    for k, v in optional_cols.items(): all_final[k] = v
+    for k, v in method_cols.items(): all_final[k] = v
+    
+    # 情況 B: 僅在 Baseline 模式下，LGB 分數放到最後面
+    if method_name == "Baseline" and 'predict_score' in df.columns:
+        all_final['predict_score'] = 'Preference (LGB)'
 
-    existing = {k: v for k, v in all_wanted.items() if k in df.columns}
+    existing = {k: v for k, v in all_final.items() if k in df.columns}
     display = df[list(existing.keys())].copy().rename(columns=existing)
     if 'Source' in display.columns:
         display['Source'] = display['Source'].apply(lambda x: "🟣 TMDB" if x == 'tmdb' else "🔵 Local")
@@ -314,15 +339,68 @@ if mode == "離線評估":
         elif method == "MMR":
             result_df = recommend_mmr(candidates, top_k, lambda_val)
         elif method == "Pareto":
-            result_df = recommend_pareto(candidates, top_k)
+            # Step 3: Pareto 先產生 layer
+            with st.spinner("⏳ 正在計算 Pareto 分層 (4-Objective)..."):
+                pareto_candidate_df = get_base_pareto_layers(candidates)
+            
+            st.subheader("🔍 Optuna Weighted Tie-break")
+            
+            # 初始化 Optuna 相關的 session state
+            if 'optuna_res' not in st.session_state:
+                st.session_state['optuna_res'] = None
+
+            # 若使用者或 Top-K 改變，清除舊的 Optuna 結果
+            if st.session_state.get('optuna_user_cache') != (user_id, top_k):
+                st.session_state['optuna_res'] = None
+                st.session_state['optuna_user_cache'] = (user_id, top_k)
+
+            actual_dict = test_ground_truth.get(user_id, {})
+            
+            if not actual_dict:
+                st.warning("⚠️ 此使用者在測試集中沒有 Ground Truth 資料，無法執行 NDCG 優化。")
+                final_result = pareto_candidate_df.copy()
+                final_result['weighted_score'] = (
+                    0.34 * final_result['predict_score'] + 0.33 * final_result['novelty_norm'] + 0.33 * final_result['quality']
+                )
+                result_df = final_result.sort_values(['pareto_rank', 'weighted_score'], ascending=[True, False]).head(top_k)
+            else:
+                # 自動執行 Optuna 搜尋 (若尚未計算過)
+                if st.session_state['optuna_res'] is None:
+                    with st.spinner(f"🔍 Optuna 正在為 User {user_id} 搜尋最佳權重 (30 trials)..."):
+                        try:
+                            best_weights, best_score, final_result = run_optuna_weight_search(
+                                search_df=pareto_candidate_df,
+                                actual_dict=actual_dict,
+                                ndcg_func=ndcg_at_k,
+                                top_k=top_k,
+                                n_trials=30
+                            )
+                            st.session_state['optuna_res'] = (best_weights, best_score, final_result)
+                        except Exception as e:
+                            st.error(f"執行出錯: {e}")
+                            result_df = pareto_candidate_df.head(top_k) # 出錯時的備案
+
+                # 顯示搜尋結果
+                if st.session_state['optuna_res']:
+                    best_weights, best_score, final_result = st.session_state['optuna_res']
+                    st.success(f"✅ Optuna 自動優化完成！NDCG@{top_k}: {best_score * 100:.2f}%")
+                    
+                    if best_score > 0:
+                        col_w1, col_w2, col_w3 = st.columns(3)
+                        col_w1.metric("Relevance Weight", f"{best_weights['relevance']:.2%}")
+                        col_w2.metric("Novelty Weight", f"{best_weights['novelty']:.2%}")
+                        col_w3.metric("Quality Weight", f"{best_weights['quality']:.2%}")
+                    
+                    result_df = final_result
+                else:
+                    result_df = pareto_candidate_df.head(top_k)
 
     actual = test_ground_truth.get(user_id, {})
     liked_ids = [mid for mid, r in actual.items() if r >= 3.0]
 
     st.subheader(f"📋 1. {method} 推薦結果 (Offline)")
     st.dataframe(
-        format_display(result_df, method, liked_ids=liked_ids), 
-        use_container_width=True
+        format_display(result_df, method, liked_ids=liked_ids)
     )
 
     # --- 刪除原本的 SHAP 詳細區塊 ---
@@ -350,7 +428,7 @@ if mode == "離線評估":
         with st.expander("點擊展開該使用者的歷史高評分紀錄"):
             liked_movies = movies_df[movies_df['movie_id'].isin(liked_ids)].copy()
             liked_movies['Rating'] = liked_movies['movie_id'].map(actual)
-            st.dataframe(liked_movies[['movie_title', 'Rating']].sort_values('Rating', ascending=False), use_container_width=True)
+            st.dataframe(liked_movies[['movie_title', 'Rating']].sort_values('Rating', ascending=False))
 
 else:  # 互動式推薦
     st.markdown("### 💬 互動式推薦需求輸入")
@@ -364,7 +442,7 @@ else:  # 互動式推薦
             label_visibility="collapsed"
         )
     with col_run:
-        interactive_run = st.button("🚀 產生推薦", type="primary", use_container_width=True)
+        interactive_run = st.button("🚀 產生推薦", type="primary")
 
     # 修改：只要 nlp_prompt 有內容且按下 Enter (Streamlit 預設行為) 或點擊按鈕，即執行推薦
     if interactive_run or (nlp_prompt and nlp_prompt.strip()):
@@ -417,11 +495,11 @@ else:  # 互動式推薦
                 
                 with col1:
                     if pd.notnull(poster_url) and str(poster_url).startswith("http"):
-                        st.image(poster_url, use_container_width=True)
+                        st.image(poster_url)
                         st.caption("來源：TMDB")
                     else:
                         # 使用預設圖片 (Step 7)
-                        st.image("https://via.placeholder.com/150x225?text=MovieLens", use_container_width=True)
+                        st.image("https://via.placeholder.com/150x225?text=MovieLens")
                         st.caption("來源：MovieLens")
                 
                 with col2:
@@ -449,6 +527,6 @@ else:  # 互動式推薦
 
         # 3. 推薦結果表格 - 移到後面
         st.subheader("🎬 3. 推薦結果與詳情")
-        st.dataframe(format_display(result_df, "Pareto + NLP"), use_container_width=True)
+        st.dataframe(format_display(result_df, "Pareto + NLP"))
     else:
         st.info("💡 請在上方輸入框描述您的電影需求，然後點擊「產生推薦」。")

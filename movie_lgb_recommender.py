@@ -70,17 +70,37 @@ def run_recommender_pipeline(alpha=1.0, mf_weight=1.0, return_metrics=False, cal
         print("請確定 u.data 與 u.item (MovieLens 100K) 在同一個資料夾，或 'MovieLens 100K' 目錄下。")
         return
     
-    ratings_df = pd.read_csv(u_data_path, sep='\t', names=data_cols)
+# ==========================================
+# [Constants & Configuration]
+# ==========================================
+GENRE_COLS = [
+    "unknown", "Action", "Adventure", "Animation",
+    "Children's", "Comedy", "Crime", "Documentary", "Drama", "Fantasy",
+    "Film-Noir", "Horror", "Musical", "Mystery", "Romance", "Sci-Fi",
+    "Thriller", "War", "Western"
+]
+
+def run_recommender_pipeline(alpha=1.0, mf_weight=1.0, return_metrics=False, calc_importance=False):
+    # ==========================================
+    # 1. 資料前處理 (Data Preprocessing)
+    # ==========================================
+    print("Loading datasets...")
+    data_cols = ['user_id', 'movie_id', 'rating', 'timestamp']
     
-    genre_cols = [
-        "unknown", "Action", "Adventure", "Animation",
-        "Children's", "Comedy", "Crime", "Documentary", "Drama", "Fantasy",
-        "Film-Noir", "Horror", "Musical", "Mystery", "Romance", "Sci-Fi",
-        "Thriller", "War", "Western"
-    ]
-    item_cols = ['movie_id', 'movie_title', 'release_date', 'video_release_date', 'imdb_url'] + genre_cols
+    u_data_path = os.path.join('MovieLens 100K', 'u.data')
+    u_item_path = os.path.join('MovieLens 100K', 'u.item')
+    
+    if not os.path.exists(u_data_path): u_data_path = 'u.data'
+    if not os.path.exists(u_item_path): u_item_path = 'u.item'
+
+    if not os.path.exists(u_data_path) or not os.path.exists(u_item_path):
+        print("請確定 u.data 與 u.item 在正確路徑。")
+        return
+    
+    ratings_df = pd.read_csv(u_data_path, sep='\t', names=data_cols)
+    item_cols = ['movie_id', 'movie_title', 'release_date', 'video_release_date', 'imdb_url'] + GENRE_COLS
     movies_df = pd.read_csv(u_item_path, sep='|', names=item_cols, encoding='latin-1')
-    movies_df = movies_df[['movie_id', 'movie_title'] + genre_cols]
+    movies_df = movies_df[['movie_id', 'movie_title'] + GENRE_COLS]
     
     # === TMDB Metadata Integration (Week 5) ===
     tmdb_path = os.path.join('TMDB metadata', 'tmdb_5000_movies.csv')
@@ -189,15 +209,15 @@ def run_recommender_pipeline(alpha=1.0, mf_weight=1.0, return_metrics=False, cal
             user_cooc_max_matrix[uid] = np.max(cooc_matrix[list(history)], axis=0)
     
     # [Interaction Feature 原料] 使用者對各 genre 的偏好輪廓
-    user_genre_counts = train_df.groupby('user_id')[genre_cols].sum()
+    user_genre_counts = train_df.groupby('user_id')[GENRE_COLS].sum()
     user_genre_profile = user_genre_counts.div(user_genre_counts.sum(axis=1) + 1e-9, axis=0).reset_index()
-    profile_cols = {g: f'user_pref_{g}' for g in genre_cols}
+    profile_cols = {g: f'user_pref_{g}' for g in GENRE_COLS}
     user_genre_profile = user_genre_profile.rename(columns=profile_cols)
     
     # [新增] User History 特徵基礎值：user-genre 的歷史平均評分與互動次數
     user_genre_avg_dict = {}
     user_genre_cnt_dict = {}
-    for g in genre_cols:
+    for g in GENRE_COLS:
         g_mask = train_df[g] == 1
         user_genre_avg_dict[f'ug_avg_{g}'] = train_df[g_mask].groupby('user_id')['rating'].mean()
         user_genre_cnt_dict[f'ug_cnt_{g}'] = train_df[g_mask].groupby('user_id').size()
@@ -212,11 +232,11 @@ def run_recommender_pipeline(alpha=1.0, mf_weight=1.0, return_metrics=False, cal
         df_feat['user_avg_rating'] = df_feat['user_avg_rating'].fillna(global_mean) 
         
         df_feat = df_feat.merge(user_genre_profile, on='user_id', how='left')
-        for g in genre_cols:
+        for g in GENRE_COLS:
             df_feat[f'user_pref_{g}'] = df_feat[f'user_pref_{g}'].fillna(0)
             
         match_series = pd.Series(np.zeros(len(df_feat)), index=df_feat.index)
-        for g in genre_cols:
+        for g in GENRE_COLS:
             match_series += df_feat[g] * df_feat[f'user_pref_{g}']
         df_feat['genre_match'] = match_series
         
@@ -224,15 +244,15 @@ def run_recommender_pipeline(alpha=1.0, mf_weight=1.0, return_metrics=False, cal
         df_feat = df_feat.merge(ug_avg_df, on='user_id', how='left')
         df_feat = df_feat.merge(ug_cnt_df, on='user_id', how='left')
         
-        ug_avg_cols = [f'ug_avg_{g}' for g in genre_cols]
-        ug_cnt_cols = [f'ug_cnt_{g}' for g in genre_cols]
+        ug_avg_cols = [f'ug_avg_{g}' for g in GENRE_COLS]
+        ug_cnt_cols = [f'ug_cnt_{g}' for g in GENRE_COLS]
         
         # 若 user 在 train 從未出現，補 0
         df_feat[ug_avg_cols] = df_feat[ug_avg_cols].fillna(0)
         df_feat[ug_cnt_cols] = df_feat[ug_cnt_cols].fillna(0)
         
         # 針對 candidate 的 genres 取出對應的歷史特徵矩陣
-        item_genres_mat = df_feat[genre_cols].values
+        item_genres_mat = df_feat[GENRE_COLS].values
         ug_avg_mat = df_feat[ug_avg_cols].values
         ug_cnt_mat = df_feat[ug_cnt_cols].values
         
@@ -295,7 +315,7 @@ def run_recommender_pipeline(alpha=1.0, mf_weight=1.0, return_metrics=False, cal
         'user_genre_max_score', 'user_genre_max_count',
         'cooc_sum', 'cooc_max', 'cooc_mean',
         'cooc_hit_count', 'pop_novelty', 'mf_score'
-    ] + genre_cols
+    ] + GENRE_COLS
     
     # ==========================================
     # 4. 訓練 LightGBM ranking model 
