@@ -88,8 +88,8 @@ class TMDBClient:
             # quality = vote_average / 10
             quality = m.get("vote_average", 0) / 10.0
             
-            # recency = (year - 1920) / (2024 - 1920)
-            recency = max(0, (release_year - 1920) / (2024 - 1920)) if release_year > 0 else 0
+            # recency = (year - 1920) / (2024 - 1920), clipped to [0, 1]
+            recency = max(0, min(1.0, (release_year - 1920) / (2024 - 1920))) if release_year > 0 else 0
             
             # predict_score: default for external movies
             predict_score = 0.5 
@@ -123,3 +123,7 @@ class TMDBClient:
             formatted_list.append(movie_item)
             
         return pd.DataFrame(formatted_list)
+
+    def get_popular_movies(self, count=50, genre_cols=None):
+        """Alias for get_candidates(user_id=0) specifically for cold-start."""
+        return self.get_candidates(user_id=0, count=count, genre_cols=genre_cols)

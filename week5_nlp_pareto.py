@@ -41,20 +41,22 @@ def _default_parsed_result() -> dict:
     """回傳一個結構化查詢結果的空白預設值（全部均等權重）"""
     return {
         "weights": {
-            "relevance": 1.0,
             "novelty":   0.0,
             "diversity": 0.0,
             "recency":   0.0,
             "quality":   0.0,
         },
+        "vintage": False,
+        "genres": [],
         "constraints": {
             "min_quality": None,
             "max_novelty": None,
             "min_novelty": None,
             "min_recency": None,
         },
-        "objectives":  [],
-        "explanation": "未解析到具體意圖，以純個人偏好（LightGBM）為主。"
+        "objectives": [],
+        "explanation": "",
+        "_parser": "default"
     }
 
 
@@ -145,7 +147,13 @@ def parse_query_rule(query: str) -> dict:
         if any(kw in q for kw in _LOW_QUALITY_KEYWORDS):
             quality_score = max(quality_score or 0.0, 0.6)
 
-    # ── 3. 填入加權結果 ─────────────────────────────────────────────
+    # ── 3. 偵測復古模式 (Vintage) ──────────────────────────────────
+    if any(kw in q for kw in ['老片', '舊片', '年代久遠', '經典老片', '古早']):
+        result["vintage"] = True
+        if not recency_score:
+            recency_score = 0.7 # 給予基本權重
+
+    # ── 4. 權重歸一化與組裝 ─────────────────────────────────────────
     objectives = []
     explanation_parts = []
 
@@ -209,41 +217,34 @@ def parse_query_llm(query: str, api_key: str | None = None) -> dict:
     # 判斷 Provider
     is_gemini = api_key.startswith("AIza")
     
-    system_prompt = """You are a semantic parser for a movie recommendation system.
-Given a user's natural language query, extract their movie preferences as a structured JSON object.
+    system_prompt = """你是一個專業的電影推薦意圖解析專家。你的任務是將使用者的自然語言需求轉換成系統可執行的權重參數。
+本系統是針對「新用戶 (冷啟動)」設計，我們專注於以下四個維度：
 
-Output ONLY valid JSON with this exact schema:
-{
-  "weights": {
-    "relevance": <float 0-1, how much user cares about personal preference>,
-    "novelty":   <float 0-1, preference for obscure/less popular movies>,
-    "diversity": <float 0-1, preference for genre variety>,
-    "recency":   <float 0-1, preference for newer movies>,
-    "quality":   <float 0-1, preference for highly-rated movies>
-  },
-  "constraints": {
-    "min_quality": <float 0-1 or null>,
-    "max_novelty": <float 0-1 or null>,
-    "min_novelty": <float 0-1 or null>,
-    "min_recency": <float 0-1 or null>
-  },
-  "objectives": [<list of active objective names, e.g. "novelty", "diversity">],
-  "explanation": "<one English sentence summarizing the user's intent>"
-}
+1. novelty (冷門度/驚喜度): 使用者是否想看一些不那麼大眾的電影？
+2. quality (品質/評分): 使用者是否非常在意電影的好評程度與經典程度？
+3. recency (新舊度/即時性): 使用者是否想看最近幾年上映的新片？
+4. diversity (多樣性/豐富度): 使用者是否希望推薦清單中的類型越分散越好？
+
+請回傳一個 JSON 格式，包含以下欄位：
+- weights: 一個字典，包含以上 4 個 key（novelty, quality, recency, diversity），權重總和必須為 1.0。
+- genres: 一個列表，包含使用者提到的電影類型 (例如: ["Action", "Comedy"])。請使用英文標籤。
+- vintage: 布林值，如果使用者明確表示想看「老片、舊片、經典老片」請設為 true。
+- explanation: 請使用「繁體中文」詳細解釋。
 
 Rules:
-- relevance default is 0.85 unless user explicitly wants to ignore personal taste
-- Use 0.9 for "very", 0.7 for normal, 0.45 for "slightly"
-- Negation (e.g. "不要太主流") -> increase novelty
-- If user says "good quality" -> set min_quality to 0.4"""
+- 若 vintage 為 true，recency 的權重必須至少為 0.4。
+- 若使用者提到特定類型，請將其放入 genres 並微降 diversity 權重。
+"""
 
     user_prompt = f"Query: {query}"
 
     try:
         if is_gemini:
             # --- Google Gemini REST API 邏輯 (指定您帳號中可用的型號) ---
+            # --- Google Gemini REST API 邏輯 (具備重試機制) ---
             import requests
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            import time
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={api_key}"
             headers = {'Content-Type': 'application/json'}
             payload = {
                 "contents": [{
@@ -253,13 +254,25 @@ Rules:
                     "temperature": 0.0
                 }
             }
-            response = requests.post(url, headers=headers, json=payload, timeout=10)
-            res_json = response.json()
             
-            if "candidates" in res_json:
-                raw = res_json['candidates'][0]['content']['parts'][0]['text']
-            else:
-                raise Exception(f"API Error: {res_json.get('error', {}).get('message', 'Unknown Error')}")
+            # 自動重試邏輯
+            for attempt in range(2):
+                try:
+                    response = requests.post(url, headers=headers, json=payload, timeout=60)
+                    res_json = response.json()
+                    
+                    if "candidates" in res_json:
+                        raw = res_json['candidates'][0]['content']['parts'][0]['text']
+                        break # 成功則跳出迴圈
+                    else:
+                        error_msg = res_json.get('error', {}).get('message', 'Unknown Error')
+                        if attempt == 0: continue # 第一次失敗則重試
+                        raise Exception(f"API Error: {error_msg}")
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+                    if attempt == 0: 
+                        time.sleep(1) # 等待一秒後重試
+                        continue
+                    raise Exception("Gemini API 連線逾時，請稍後再試。")
         else:
             # --- OpenAI 邏輯 ---
             import openai
@@ -280,11 +293,21 @@ Rules:
         parsed = json.loads(raw)
 
         result = _default_parsed_result()
-        result["weights"].update(parsed.get("weights", {}))
-        result["constraints"].update(parsed.get("constraints", {}))
-        result["objectives"]  = parsed.get("objectives", [])
+        # 確保權重對齊四維度
+        w = parsed.get("weights", {})
+        result["weights"] = {
+            "novelty": w.get("novelty", 0.0),
+            "quality": w.get("quality", 0.0),
+            "recency": w.get("recency", 0.0),
+            "diversity": w.get("diversity", 0.0)
+        }
         result["explanation"] = parsed.get("explanation", "")
-        result["_parser"]     = f"llm ({'Gemini' if is_gemini else 'OpenAI'})"
+        result["vintage"] = parsed.get("vintage", False)
+        result["genres"] = parsed.get("genres", [])
+        
+        # 將有權重的維度加入 objectives
+        result["objectives"] = [k for k, v in result["weights"].items() if v > 0]
+        result["_parser"] = "llm_gemini" if is_gemini else "llm_openai"
         return result
 
     except Exception as e:
@@ -394,6 +417,29 @@ def dynamic_pareto_rerank(user_candidates, genre_cols, objectives,
             final_df['diversity'] = 0.0
         return final_df
 
+    # ──────────────────────────────────────────────
+    # 【新增】類型加壓 (Genre Boosting) 與 復古模式 (Vintage)
+    # ──────────────────────────────────────────────
+    if parsed_result:
+        # 1. 復古模式處理
+        if parsed_result.get("vintage") is True and 'recency' in df.columns:
+            # 硬性過濾：當使用者要求老片時，直接剔除新片 (recency > 0.7 約為 2010 年後)
+            # 這樣即便新片品質再高，也無法進入推薦池
+            df = df[df['recency'] <= 0.7].copy().reset_index(drop=True)
+            
+            # 剩餘的老片進行反轉，讓越老的片分數越高
+            if not df.empty:
+                df['recency'] = 1.0 - df['recency']
+            
+        # 2. 類型加壓
+        if not df.empty and parsed_result.get("genres"):
+            target_genres = parsed_result["genres"]
+            genre_matches = df[genre_cols].apply(lambda row: sum(row[g] for g in target_genres if g in genre_cols), axis=1)
+            df['preference'] += genre_matches * 10.0 
+            
+            if "weights" in parsed_result and "diversity" in parsed_result["weights"]:
+                parsed_result["weights"]["diversity"] *= 0.5
+
     selected_indices = []
     unselected_indices = list(df.index)
 
@@ -449,20 +495,23 @@ def dynamic_pareto_rerank(user_candidates, genre_cols, objectives,
         unselected_indices.remove(best_idx)
 
     # ──────────────────────────────────────────────
-    # 【第二階段】Tie-break Sorting（支援動態加權）
+    # 【第二階段】Tie-break Sorting（直接計算 Raw Score）
     # ──────────────────────────────────────────────
     final_df = df.loc[selected_indices].copy()
-    tb_scaler = MinMaxScaler()
 
     if parsed_result is not None and len(final_df) > 1:
-        # 動態加權 tie-break：使用 parsed_result 的 weights
         w = parsed_result.get("weights", {})
         final_df = final_df.copy()
-        final_df['_pref_norm'] = tb_scaler.fit_transform(final_df[['predict_score']])
 
-        score = w.get("relevance", 0.85) * final_df['_pref_norm']
+        # 確保所有顯示與計算的欄位都在 [0, 1] 區間
+        for col in ['novelty', 'recency', 'quality', 'diversity']:
+            if col in final_df.columns:
+                final_df[col] = final_df[col].clip(0, 1)
+
+        # 與 UI 手算一致：直接使用原始分數相乘
+        score = 0.0
         for dim in ['novelty', 'diversity', 'recency', 'quality']:
-            if dim in final_df.columns and w.get(dim, 0) > 0:
+            if dim in final_df.columns:
                 score += w.get(dim, 0) * final_df[dim]
 
         final_df['final_score'] = score

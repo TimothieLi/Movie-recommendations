@@ -92,7 +92,7 @@ with st.sidebar:
         
         lambda_val = 0.5
         if method == "MMR":
-            lambda_val = st.slider("λ (Relevance ↔ Diversity)", 0.0, 1.0, 0.5, 0.25)
+            lambda_val = st.slider("λ (Diversity ↔ Relevance)", 0.0, 1.0, 0.5, 0.25)
         
         top_k = st.selectbox("📌 推薦數量 (Top-K)", [10, 15, 20], index=0)
         # 離線評估不使用 TMDB 與 NLP
@@ -121,22 +121,16 @@ with st.sidebar:
         
     else:  # 互動式推薦
         st.header("⚙️ 推薦設定")
-        with st.expander("🤖 LLM 解析設定"):
-            # 優先從 Secrets 讀取，若無則留空
-            default_key = get_secret("OPENAI_API_KEY") or get_secret("GEMINI_API_KEY") or ""
-            use_llm = st.checkbox("啟用 LLM 語意解析", value=True if default_key else False)
-            api_key = st.text_input("LLM API Key (OpenAI / Gemini)", value=default_key, type="password", help="支援 OpenAI (sk-...) 或 Google Gemini (AIza...)")
-            
-            if api_key:
-                if api_key.startswith("AIza"):
-                    st.info("✨ 已偵測到 Google Gemini Key")
-                elif api_key.startswith("sk-"):
-                    st.info("🌌 已偵測到 OpenAI Key")
-            
-        with st.expander("🌐 外部資料整合"):
-            tmdb_api_key = st.text_input("TMDB API Key", value=get_secret("TMDB_API_KEY", ""), type="password", help="輸入 API Key 啟用 TMDB 推薦")
-            if tmdb_api_key:
-                st.success("✅ TMDB 整合已開啟")
+        
+        # 自動從 Secrets 讀取 API Key (不再需要手動輸入)
+        api_key = get_secret("OPENAI_API_KEY") or get_secret("GEMINI_API_KEY") or ""
+        use_llm = True if api_key else False
+        
+        tmdb_api_key = get_secret("TMDB_API_KEY", "")
+        if tmdb_api_key:
+            st.success("✅ TMDB 整合已開啟")
+        else:
+            st.warning("⚠️ 未偵測到 TMDB API Key，將無法顯示海報牆。")
         
         top_k = st.selectbox("📌 推薦數量 (Top-K)", [10, 15, 20], index=0)
         # 互動模式固定使用 NLP-Pareto 邏輯，User 固定用第一個作為基礎特徵參考（但不顯示）
@@ -203,8 +197,14 @@ def recommend_mmr(candidates, k, lv):
     return mmr_rerank(candidates, GENRE_COLS, lambda_val=lv, k=k)
 
 def recommend_pareto(candidates, k):
-    from week4_reranking import pareto_rerank
-    return pareto_rerank(candidates, k=k)
+    from week5_nlp_pareto import dynamic_pareto_rerank
+    # 離線評估專用：專注於相關性 (LGB)、冷門度、品質這三個核心維度
+    return dynamic_pareto_rerank(
+        candidates, 
+        genre_cols=GENRE_COLS, 
+        objectives=['novelty', 'quality'], 
+        k=k
+    )
 
 # ── 修復：將快取函數移至全域範圍，避免定義在 loop 中導致當機 ────────────────
 @st.cache_data(show_spinner=False)
@@ -218,20 +218,31 @@ def get_base_pareto_layers(_df):
     return pareto_rerank(_df, k=len(_df))
 # ────────────────────────────────────────────────────────────────────────
 
-def get_cold_start_candidates():
-    """取得全體電影作為冷啟動候選池"""
+def get_cold_start_candidates(tmdb_api_key=None):
+    """取得全體電影作為冷啟動候選池，並整合 TMDB 資料"""
+    # 基礎 Local 資料
     df = movies_df.copy()
     df['source'] = 'movielens'
     
-    # Cold-start 無個人化預測分數，使用 quality 作為基礎相關性
-    if 'predict_score' not in df.columns:
-        df['predict_score'] = df['quality'] if 'quality' in df.columns else 0.5
+    # Cold-start 無個人化預測分數，設為 0
+    df['predict_score'] = 0.0
     
+    # 整合 TMDB 熱門片 (若有 Key)
+    if tmdb_api_key:
+        try:
+            from tmdb_api import TMDBClient
+            client = TMDBClient(tmdb_api_key)
+            # 冷啟動直接抓取「熱門電影」作為候選 pool
+            tmdb_df = client.get_popular_movies(count=50, genre_cols=GENRE_COLS)
+            if not tmdb_df.empty:
+                df = pd.concat([df, tmdb_df], ignore_index=True)
+        except Exception as e:
+            # st.warning(f"TMDB 獲取失敗: {e}")
+            pass
+
     # 確保關鍵維度存在
-    if 'novelty_norm' not in df.columns:
-        df['novelty_norm'] = df['novelty'] if 'novelty' in df.columns else 0.5
-    if 'quality' not in df.columns:
-        df['quality'] = 0.5
+    if 'novelty_norm' not in df.columns: df['novelty_norm'] = df.get('novelty', 0.5)
+    if 'quality' not in df.columns: df['quality'] = 0.5
     if 'recency' not in df.columns:
         if 'release_year' in df.columns:
             from sklearn.preprocessing import MinMaxScaler
@@ -247,16 +258,34 @@ def recommend_nlp_pareto(candidates, k, prompt, use_llm=False, api_key=None):
     else:
         parsed = parse_query_rule(prompt)
     
-    # Fallback 機制：若無特定目標，推薦最近期電影
-    if not parsed.get("objectives"):
+    # 權重處理與對齊
+    w = parsed.get("weights", {})
+    new_weights = {
+        "novelty": w.get("novelty", 0.0),
+        "quality": w.get("quality", 0.0),
+        "recency": w.get("recency", 0.0),
+        "diversity": w.get("diversity", 0.0)
+    }
+    
+    # 檢查是否為 Fallback (無權重)
+    if sum(new_weights.values()) == 0:
+        parsed["weights"] = {"novelty": 0.0, "quality": 0.0, "recency": 0.0, "diversity": 0.0}
         parsed["explanation"] = "⚠️ 沒有找到相符合的條件，因此推薦最近期的電影。"
-        # 直接使用 recency 排序作為結果
-        result_df = candidates.sort_values("recency", ascending=False).head(k).copy()
-        result_df['pareto_rank'] = 1
-        result_df['final_score'] = result_df['recency']
-        return result_df, parsed
-        
-    return dynamic_pareto_rerank(candidates, GENRE_COLS, parsed["objectives"], k=k, parsed_result=parsed), parsed
+        # 為了讓排序能執行，內部給予微量 recency，但顯示維持 0
+        internal_weights = {"recency": 1.0} 
+    else:
+        parsed["weights"] = new_weights
+        internal_weights = new_weights
+
+    # 呼叫 Pareto 排序
+    result_df = dynamic_pareto_rerank(
+        candidates, 
+        genre_cols=GENRE_COLS, 
+        objectives=['novelty', 'quality', 'recency', 'diversity'], 
+        parsed_result=parsed,
+        k=k
+    )
+    return result_df, parsed
 
 # ─────────────────────────────────────────────
 # 4. 顯示輔助函式
@@ -295,13 +324,15 @@ def format_display(df, method_name, liked_ids=None):
         optional_cols = {}
         method_cols = {'similarity_penalty': 'Sim Penalty', 'mmr_score': 'MMR Score'}
     elif method_name == "Pareto":
-        # Pareto 顯示 Recency, Quality, Novelty 並加回 Pareto Rank 與 Weighted Score
-        # 根據要求移除 Source
-        optional_cols = {'recency': 'Recency', 'quality': 'Quality', 'novelty': 'Novelty'}
+        # Pareto 離線模式：顯示 Novelty, Quality 並加回 Pareto Rank 與 Weighted Score
+        optional_cols = {
+            'novelty': 'Novelty',
+            'quality': 'Quality'
+        }
         method_cols = {'pareto_rank': 'Pareto Rank', 'weighted_score': 'Weighted Score'}
     elif method_name == "Pareto + NLP":
         # 互動模式移除內部過程欄位，顯示最終分數
-        optional_cols.update({'recency': 'Recency', 'quality': 'Quality'})
+        optional_cols.update({'recency': 'Recency', 'quality': 'Quality', 'diversity': 'Diversity'})
         method_cols = {'final_score': 'Final Score'}
     elif method_name == "Baseline":
         optional_cols = {}
@@ -398,20 +429,21 @@ if mode == "離線評估":
                 st.warning("⚠️ 此使用者在測試集中沒有 Ground Truth 資料，無法執行 NDCG 優化。")
                 final_result = pareto_candidate_df.copy()
                 final_result['weighted_score'] = (
-                    0.34 * final_result['predict_score'] + 0.33 * final_result['novelty_norm'] + 0.33 * final_result['quality']
+                    0.5 * final_result['novelty_norm'] + 0.5 * final_result['quality']
                 )
                 result_df = final_result.sort_values(['pareto_rank', 'weighted_score'], ascending=[True, False]).head(top_k)
             else:
                 # 自動執行 Optuna 搜尋 (若尚未計算過)
                 if st.session_state['optuna_res'] is None:
-                    with st.spinner(f"🔍 Optuna 正在為 User {user_id} 搜尋最佳權重 (30 trials)..."):
+                    with st.spinner(f"🔍 Optuna 正在為 User {user_id} 搜尋最佳權重 (50 trials)..."):
                         try:
                             best_weights, best_score, final_result = run_optuna_weight_search(
                                 search_df=pareto_candidate_df,
                                 actual_dict=actual_dict,
                                 ndcg_func=ndcg_at_k,
                                 top_k=top_k,
-                                n_trials=30
+                                n_trials=50,
+                                genre_cols=GENRE_COLS
                             )
                             st.session_state['optuna_res'] = (best_weights, best_score, final_result)
                         except Exception as e:
@@ -424,10 +456,11 @@ if mode == "離線評估":
                     st.success(f"✅ Optuna 自動優化完成！NDCG@{top_k}: {best_score * 100:.2f}%")
                     
                     if best_score > 0:
-                        col_w1, col_w2, col_w3 = st.columns(3)
-                        col_w1.metric("Relevance Weight", f"{best_weights['relevance']:.2%}")
-                        col_w2.metric("Novelty Weight", f"{best_weights['novelty']:.2%}")
-                        col_w3.metric("Quality Weight", f"{best_weights['quality']:.2%}")
+                        st.markdown("#### 🎯 Optuna 最佳權重配置 (離線優化)")
+                        cols = st.columns(3)
+                        cols[0].metric("Relevance", f"{best_weights['relevance']:.1%}")
+                        cols[1].metric("Novelty", f"{best_weights['novelty']:.1%}")
+                        cols[2].metric("Quality", f"{best_weights['quality']:.1%}")
                     
                     result_df = final_result
                 else:
@@ -437,6 +470,26 @@ if mode == "離線評估":
     liked_ids = [mid for mid, r in actual.items() if r >= 3.0]
 
     st.subheader(f"📋 1. {method} 推薦結果 (Offline)")
+    
+    # 最終多樣性補丁：在顯示前重新計算每部片對清單多樣性的貢獻
+    if 'diversity' not in result_df.columns or (result_df['diversity'] == 0).all():
+        from week6_evaluation import calculate_ild_at_k
+        # 這裡我們計算一個簡單的指標：該片與清單內其他片的平均 Jaccard 距離
+        result_df = result_df.copy()
+        genres = result_df[GENRE_COLS].values
+        for i in range(len(result_df)):
+            if len(result_df) <= 1: 
+                result_df.loc[result_df.index[i], 'diversity'] = 1.0
+                continue
+            # 計算與其他電影的平均距離
+            dist = 0
+            for j in range(len(result_df)):
+                if i == j: continue
+                intersection = np.logical_and(genres[i], genres[j]).sum()
+                union = np.logical_or(genres[i], genres[j]).sum()
+                dist += (1 - intersection / union) if union > 0 else 1.0
+            result_df.loc[result_df.index[i], 'diversity'] = dist / (len(result_df) - 1)
+        
     st.dataframe(
         format_display(result_df, method, liked_ids=liked_ids)
     )
@@ -482,13 +535,13 @@ else:  # 互動式推薦
     with col_run:
         interactive_run = st.button("🚀 產生推薦", type="primary")
 
-    # 修改：只要 nlp_prompt 有內容且按下 Enter (Streamlit 預設行為) 或點擊按鈕，即執行推薦
+    # 修改：只要 nlp_prompt 有內容且按下 Enter (Streamlit 預設行為) 或點擊認按鈕，即執行推薦
     if interactive_run or (nlp_prompt and nlp_prompt.strip()):
-        # 改為冷啟動候選池：不使用 user_id
-        candidates = get_cold_start_candidates()
+        # 改為冷啟動候選池：整合 TMDB
+        candidates = get_cold_start_candidates(tmdb_api_key=tmdb_api_key)
         
         # --- 執行互動式推薦 ---
-        with st.spinner("🧠 語意解析與跨域推薦計算中…"):
+        with st.spinner("🧠 正在根據您的指令在四維空間搜尋最佳解..."):
             result_df, parsed = recommend_nlp_pareto(candidates, top_k, nlp_prompt, use_llm=use_llm, api_key=api_key)
 
         # 1. 語意解析說明
@@ -507,17 +560,21 @@ else:  # 互動式推薦
                 st.code(parsed["_llm_error"])
         weights = parsed.get("weights", {})
         if weights:
-            st.markdown("**🎯 目標維度佔比 (Relative Importance)**")
-            total_w = sum(weights.values())
-            if total_w == 0: total_w = 1.0
+            st.markdown("**🎯 冷啟動維度佔比 (Relative Importance)**")
+            total_w = sum(weights.values()) if sum(weights.values()) > 0 else 1.0
             
-            w_cols = st.columns(5)
-            w_cols[0].metric("個人偏好", f"{(weights.get('relevance', 0)/total_w)*100:.0f}%")
-            w_cols[1].metric("冷門度", f"{(weights.get('novelty', 0)/total_w)*100:.0f}%")
-            w_cols[2].metric("多樣性", f"{(weights.get('diversity', 0)/total_w)*100:.0f}%")
-            w_cols[3].metric("新舊度", f"{(weights.get('recency', 0)/total_w)*100:.0f}%")
-            w_cols[4].metric("評分品質", f"{(weights.get('quality', 0)/total_w)*100:.0f}%")
-            st.caption("註：佔比代表各維度對最終排序分數（Final Score）的相對貢獻權重。")
+            w_cols = st.columns(4)
+            w_cols[0].metric("冷門度", f"{(weights.get('novelty', 0)/total_w)*100:.0f}%")
+            w_cols[1].metric("品質評分", f"{(weights.get('quality', 0)/total_w)*100:.0f}%")
+            w_cols[2].metric("新舊程度", f"{(weights.get('recency', 0)/total_w)*100:.0f}%")
+            w_cols[3].metric("多樣性", f"{(weights.get('diversity', 0)/total_w)*100:.0f}%")
+            # 顯示解析思維
+            if "explanation" in parsed:
+                p_type = parsed.get("_parser", "rule_based")
+                if "fallback" in p_type or p_type == "rule_based":
+                    st.warning(f"**💡 備用解析模式 (AI 忙碌中)：**  \n{parsed['explanation']}")
+                else:
+                    st.info(f"**🤖 Gemini 解析思維 (繁體中文)：**  \n{parsed['explanation']}")
 
         st.markdown("---")
         
@@ -560,13 +617,7 @@ else:  # 互動式推薦
                         st.write(description)
                     else:
                         st.write("此電影來自 MovieLens 資料集，正在尋找詳細簡介...")
-                    
-                    s_cols = st.columns(4)
-                    s_cols[0].caption(f"🏆 Final Score: {row.get('final_score', 0):.4f}")
-                    s_cols[1].caption(f"🔍 Novelty: {row.get('novelty', 0):.2f}")
-                    s_cols[2].caption(f"📅 Recency: {row.get('recency', 0):.2f}")
-                    s_cols[3].caption(f"⭐ Quality: {row.get('quality', 0):.2f}")
-                st.markdown("---")
+                    st.markdown("---")
 
         # 3. 推薦結果表格 - 移到後面
         st.subheader("🎬 3. 推薦結果與詳情")
