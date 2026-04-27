@@ -364,6 +364,7 @@ def format_display(df, method_name, liked_ids=None):
     display = df[list(existing.keys())].copy().rename(columns=existing)
     if 'Source' in display.columns:
         display['Source'] = display['Source'].apply(lambda x: "🟣 TMDB" if x == 'tmdb' else "🔵 Local")
+
     display.index = range(1, len(display) + 1)
     display.index.name = "Rank"
     return display.round(4)
@@ -554,10 +555,8 @@ else:  # 互動式推薦
         p_type = parsed.get("_parser", "rule_based")
         st.success(f"✅ 解析完成 ({p_type.upper()})")
         
-        # --- 新增：顯示詳細報錯訊息 (僅在 Fallback 時) ---
-        if p_type == "rule_based_fallback" and "_llm_error" in parsed:
-            with st.expander("❌ 查看 LLM 報錯細節"):
-                st.code(parsed["_llm_error"])
+        # 移除 LLM 報錯細節 
+
         weights = parsed.get("weights", {})
         if weights:
             st.markdown("**🎯 冷啟動維度佔比 (Relative Importance)**")
@@ -572,9 +571,9 @@ else:  # 互動式推薦
             if "explanation" in parsed:
                 p_type = parsed.get("_parser", "rule_based")
                 if "fallback" in p_type or p_type == "rule_based":
-                    st.warning(f"**💡 備用解析模式 (AI 忙碌中)：**  \n{parsed['explanation']}")
+                    st.warning("**💡 備用解析模式 (AI 忙碌中)**")
                 else:
-                    st.info(f"**🤖 Gemini 解析思維 (繁體中文)：**  \n{parsed['explanation']}")
+                    st.info(f"**🤖 Gemini 解析思維：**  \n{parsed['explanation']}")
 
         st.markdown("---")
         
@@ -582,29 +581,33 @@ else:  # 互動式推薦
         st.subheader("🌟 2. 精選推薦詳情 (Top 5 Featured)")
         for idx, row in result_df.head(5).iterrows():
             with st.container():
-                # Step 7 & 8: 顯示圖片與簡介，移除 movie_id
+                # Step 7 & 8: 顯示圖片與簡介
                 col1, col2 = st.columns([1, 4])
                 
-                # 取得圖片與簡介
-                poster_url = row.get('poster_url')
-                description = row.get('overview') 
+                # 確保變數在迴圈內被正確初始化
+                poster_url = row.get('poster_url') if 'poster_url' in row else None
+                description = row.get('overview') if 'overview' in row else ""
                 
                 # --- 新增：針對 Local 電影自動從 TMDB 補完海報與簡介 ---
-                if (pd.isna(poster_url) or not poster_url) and tmdb_api_key:
+                if (pd.notnull(tmdb_api_key)) and (pd.isna(poster_url) or not poster_url):
                     p, d = get_movie_details_from_tmdb(row['movie_title'], tmdb_api_key)
                     if p: poster_url = p
                     if d: description = d
                 
-                # Fallback 處理
+                # Fallback 處理：確保 poster_url 最終為字串或 None
                 if pd.isna(poster_url) or not poster_url:
-                    poster_url = row.get('poster_path', "https://via.placeholder.com/150x225?text=MovieLens")
+                    poster_url = row.get('poster_path')
+                    if pd.isna(poster_url) or not poster_url:
+                        poster_url = "https://via.placeholder.com/150x225?text=MovieLens"
                 
                 with col1:
-                    if pd.notnull(poster_url) and str(poster_url).startswith("http"):
-                        st.image(poster_url, use_column_width=True)
+                    # 確保 poster_url 是有效的 URL
+                    is_valid_url = pd.notnull(poster_url) and str(poster_url).startswith("http")
+                    display_url = poster_url if is_valid_url else "https://via.placeholder.com/150x225?text=No+Poster"
+                    
+                    st.image(display_url, use_container_width=True)
+                    if is_valid_url:
                         st.caption("來源：TMDB")
-                    else:
-                        st.image("https://via.placeholder.com/150x225?text=MovieLens", use_column_width=True)
                 
                 with col2:
                     st.subheader(f"{row['movie_title']}")

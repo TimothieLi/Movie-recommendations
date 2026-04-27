@@ -32,11 +32,11 @@
 - **Week 5–7: LLM 語意解析與 TMDB 整合**
   - 導入 Gemini API 作為語意解析器，將自然語言轉為結構化權重。
   - 整合 TMDB API 抓取即時電影資訊。
-- **Week 8: 冷啟動互動模式與穩定性優化**
-  - **冷啟動互動模式 (Cold-Start Mode)**：重構推薦邏輯，專注於 **Novelty**、**Quality**、**Recency** 與 **Diversity** 四大維度，無需用戶歷史資料。
-  - **語意解析升級**：實作 **類型加壓 (Genre Boosting)** 與 **復古硬性過濾 (Hard Vintage Filter)**，確保「老片」查詢能精確過濾新片。
-  - **數值規範化**：所有維度嚴格限制在 [0, 1] 區間，確保手算 Final Score 的準確性。
-  - **自動化金鑰配置**：支援 `.streamlit/secrets.toml` 自動讀取，提升安全性。
+- **Week 8: 系統穩定性優化與 UI/UX 精煉**
+  - **冷啟動模式優化**：重構 `dynamic_pareto_rerank`，解決 Vintage 模式與年份約束的邏輯衝突。
+  - **互動介面精煉**：移除冗餘的 Source 標籤與詳細報錯，優化海報牆顯示邏輯與過時的 Streamlit 語法。
+  - **穩健性增強**：實作語意解析的「優雅降級」機制，當 API 忙碌時自動切換至 Rule-based 模式。
+  - **效能修補**：修正了 `tb_scaler` 未定義等關鍵 Bug，確保 Tie-break 排序的穩定性。
 
 ## 📊 實驗結果 (測試集)
 

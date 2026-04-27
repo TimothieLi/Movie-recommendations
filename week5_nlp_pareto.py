@@ -81,7 +81,7 @@ _RECENCY_KEYWORDS = {
     "low":    ['有點新', '稍微新'],
 }
 _QUALITY_KEYWORDS = {
-    "high":   ['非常高評價', '超高評分', '神作', '必看', '經典'],
+    "high":   ['非常高評價', '超高評分', '評價很高', '評分很高', '神作', '必看', '經典'],
     "medium": ['高評價', '好評', '高分', '評價好', '優質', '好片', '品質好'],
     "low":    ['還不錯', '評價不差', '有點評價'],
 }
@@ -187,8 +187,8 @@ def parse_query_rule(query: str) -> dict:
     if novelty_score is not None and novelty_score >= 0.8:
         result["constraints"]["min_novelty"] = 0.5
 
-    # 若強調「新」，加入最低年份新穎度下限
-    if recency_score is not None and recency_score >= 0.7:
+    # 若強調「新」，加入最低年份新穎度下限 (老片模式下不啟用)
+    if recency_score is not None and recency_score >= 0.7 and not result.get("vintage"):
         result["constraints"]["min_recency"] = 0.5
 
     # ── 5. 組合解析說明（用於 Streamlit 展示）────────────────────────
@@ -524,6 +524,7 @@ def dynamic_pareto_rerank(user_candidates, genre_cols, objectives,
         if novelty_col not in final_df.columns:
             final_df[novelty_col] = 0.0
         final_df = final_df.copy()
+        tb_scaler = MinMaxScaler()
         final_df['_predict_score_norm'] = tb_scaler.fit_transform(final_df[['predict_score']])
         final_df['final_score'] = (
             0.7 * final_df['_predict_score_norm'] +

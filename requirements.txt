@@ -8,3 +8,7 @@ matplotlib
 plotly
 toml
 scipy
+lightgbm
+shap
+openai
+pyparsing
